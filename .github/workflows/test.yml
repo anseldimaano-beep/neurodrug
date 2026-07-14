@@ -1,0 +1,73 @@
+name: NeuroDrug CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: neurodrug_user
+          POSTGRES_PASSWORD: neurodrug_pass
+          POSTGRES_DB: neurodrug_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install aiosqlite
+
+      - name: Lint (ruff)
+        working-directory: backend
+        run: |
+          pip install ruff
+          ruff check app/ --ignore E501
+
+      - name: Run tests
+        working-directory: backend
+        env:
+          POSTGRES_USER: neurodrug_user
+          POSTGRES_PASSWORD: neurodrug_pass
+          POSTGRES_DB: neurodrug_test
+          POSTGRES_HOST: localhost
+          REDIS_URL: redis://localhost:6379/0
+          CELERY_BROKER_URL: redis://localhost:6379/1
+          CELERY_RESULT_BACKEND: redis://localhost:6379/2
+          SECRET_KEY: test-secret-key-for-ci-min-32-chars-xxxx
+        run: |
+          pytest tests/ -v --cov=app --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./backend/coverage.xml

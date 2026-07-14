@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neurodrug-api
+  namespace: neurodrug
+  labels:
+    app: neurodrug-api
+    version: "4.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: neurodrug-api
+  template:
+    metadata:
+      labels:
+        app: neurodrug-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      containers:
+        - name: api
+          image: neurodrug/api:4.0.0
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: neurodrug-config
+            - secretRef:
+                name: neurodrug-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/checkpoints
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: checkpoints-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neurodrug-worker
+  namespace: neurodrug
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neurodrug-worker
+  template:
+    metadata:
+      labels:
+        app: neurodrug-worker
+    spec:
+      containers:
+        - name: worker
+          image: neurodrug/api:4.0.0
+          command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+          envFrom:
+            - configMapRef:
+                name: neurodrug-config
+            - secretRef:
+                name: neurodrug-secrets
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"

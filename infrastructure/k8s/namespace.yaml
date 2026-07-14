@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neurodrug
+  labels:
+    app.kubernetes.io/name: neurodrug
+    app.kubernetes.io/version: "4.0.0"

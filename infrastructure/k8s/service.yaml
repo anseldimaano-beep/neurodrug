@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: neurodrug-api-service
+  namespace: neurodrug
+spec:
+  selector:
+    app: neurodrug-api
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: neurodrug-ingress
+  namespace: neurodrug
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - api.neurodrug.local
+      secretName: neurodrug-tls
+  rules:
+    - host: api.neurodrug.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: neurodrug-api-service
+                port:
+                  number: 80

@@ -1,0 +1,12 @@
+{{/*
+deployment.yaml — delegates to the neurodrug.deployment named template
+defined in _helpers.tpl.
+
+FIX C7: _helpers.tpl was previously missing entirely, causing:
+  Error: function "neurodrug.deployment" not defined
+
+After adding _helpers.tpl this passthrough pattern works correctly and
+keeps the main template file clean while the full YAML lives in helpers
+where it can be shared by other templates (e.g. worker Deployment).
+*/}}
+{{- include "neurodrug.deployment" . -}}
