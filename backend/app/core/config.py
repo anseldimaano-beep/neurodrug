@@ -31,7 +31,7 @@ class Settings(BaseSettings):
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
-        return f"{base}?sslmode=require" if self.POSTGRES_SSL else base)
+        return f"{base}?sslmode=require" if self.POSTGRES_SSL else base
 
     # Redis / Celery
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
