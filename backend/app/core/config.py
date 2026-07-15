@@ -15,20 +15,23 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = Field(default="neurodrug")
     POSTGRES_HOST: str = Field(default="localhost")
     POSTGRES_PORT: int = Field(default=5432)
+    POSTGRES_SSL: bool = Field(default=False)
 
     @property
     def DATABASE_URL(self) -> str:
-        return (
+        base = (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+        return f"{base}?ssl=require" if self.POSTGRES_SSL else base
 
     @property
     def DATABASE_URL_SYNC(self) -> str:
-        return (
+        base = (
             f"postgresql+psycopg2://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+        return f"{base}?sslmode=require" if self.POSTGRES_SSL else base)
 
     # Redis / Celery
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
