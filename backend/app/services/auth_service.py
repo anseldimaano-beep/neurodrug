@@ -36,7 +36,10 @@ class AuthService:
         from sqlalchemy.orm import selectinload
         result = await self.db.execute(
             select(User)
-            .options(selectinload(User.role))
+            .options(
+                selectinload(User.role),
+                selectinload(User.audit_logs),
+            )
             .where(User.id == user_id, User.is_deleted == False)
         )
         return result.scalar_one_or_none()

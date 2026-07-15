@@ -354,6 +354,7 @@ class DataSource(Base, AuditMixin):
 class ETLJob(Base):
     __tablename__ = "etl_jobs"
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     records_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -362,3 +363,7 @@ class ETLJob(Base):
     error_log: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    is_deleted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)

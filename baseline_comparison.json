@@ -1,0 +1,85 @@
+[
+  {
+    "model": "HGT (proposed)",
+    "type": "graph",
+    "roc_auc": 0.9036778344539763,
+    "average_precision": 0.7228173247429421,
+    "hits@10": 0.06578947368421052,
+    "hits@20": 0.13157894736842105,
+    "mrr": 0.03333979275229441,
+    "ndcg@10": 1.0,
+    "p_value_vs_hgt": null
+  },
+  {
+    "model": "Random",
+    "type": "traditional",
+    "roc_auc": 0.479364711337816,
+    "average_precision": 0.26740717396851843,
+    "hits@10": 0.02631578947368421,
+    "hits@20": 0.05263157894736842,
+    "mrr": 0.017518731266751974,
+    "ndcg@10": 0.47215670662474735,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Jaccard similarity",
+    "type": "traditional",
+    "roc_auc": 0.19273127753303965,
+    "average_precision": 0.2508250825082508,
+    "hits@10": 0.0,
+    "hits@20": 0.0,
+    "mrr": 0.0021808500846003283,
+    "ndcg@10": 0.0,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Matrix Factorization",
+    "type": "traditional",
+    "roc_auc": 0.5492913865059124,
+    "average_precision": 0.2950899661127325,
+    "hits@10": 0.02631578947368421,
+    "hits@20": 0.08552631578947369,
+    "mrr": 0.012857277829928623,
+    "ndcg@10": 0.3156169274023381,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Homogeneous GCN",
+    "type": "graph",
+    "roc_auc": 0.6906880361697194,
+    "average_precision": 0.4283120776141661,
+    "hits@10": 0.05263157894736842,
+    "hits@20": 0.07894736842105263,
+    "mrr": 0.018965806423081176,
+    "ndcg@10": 0.6410457898283654,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "R-GCN",
+    "type": "graph",
+    "roc_auc": 0.9852480871782983,
+    "average_precision": 0.9553026966439258,
+    "hits@10": 0.06578947368421052,
+    "hits@20": 0.13157894736842105,
+    "mrr": 0.03651003408404154,
+    "ndcg@10": 1.0,
+    "p_value_vs_hgt": 1.0,
+    "significant_at_0.05": false
+  },
+  {
+    "model": "HAN",
+    "type": "graph",
+    "roc_auc": 0.9289502666357524,
+    "average_precision": 0.7675426649543611,
+    "hits@10": 0.05921052631578947,
+    "hits@20": 0.125,
+    "mrr": 0.027819307151202427,
+    "ndcg@10": 0.77990823370192,
+    "p_value_vs_hgt": 0.879,
+    "significant_at_0.05": false
+  }
+]

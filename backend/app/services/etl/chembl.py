@@ -1,7 +1,9 @@
 import httpx
+import logging
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 
 class ChEMBLClient:
     def __init__(self):
@@ -23,6 +25,9 @@ class ChEMBLClient:
     async def get_molecule(self, chembl_id: str):
         url = f"{self.base_url}/molecule/{chembl_id}.json"
         response = await self.client.get(url)
+        if response.status_code == 404:
+            logger.warning(f"[ChEMBL] {chembl_id} not found - skipping")
+            return None
         response.raise_for_status()
         return response.json()
 
@@ -32,3 +37,4 @@ class ChEMBLClient:
         response = await self.client.get(url, params=params)
         response.raise_for_status()
         return response.json()
+

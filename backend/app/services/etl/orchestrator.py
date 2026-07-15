@@ -3,7 +3,7 @@ from sqlalchemy import select, update
 from datetime import datetime
 from typing import List
 
-from app.models.domain import ETLJob, DataSource, Gene, Drug, Disease, Interaction
+from app.models.domain import Drug, Disease, Gene, Protein, Interaction, DataSource, ETLJob
 from app.services.etl.string import StringClient
 from app.services.etl.opentargets import OpenTargetsClient
 from app.services.etl.dgidb import DGIdbClient
@@ -12,6 +12,10 @@ from app.services.etl.uniprot import UniProtClient
 from app.services.etl.clinicaltrials import ClinicalTrialsClient
 from app.services.etl.gdc import GDCClient
 from app.core.logging import logger
+
+# ── Open Targets disease ID mapping ────────────────────────────────────────────
+# OpenTargets Platform v4 accepts MONDO IDs directly — no EFO translation needed.
+# MONDO IDs stored in the Disease table are passed straight to the GraphQL API.
 
 
 class ETLOrchestrator:
@@ -61,13 +65,16 @@ class ETLOrchestrator:
 
     # ── OpenTargets ────────────────────────────────────────────────────────
     async def ingest_opentargets(self, job_id: int, efo_id: str):
+        # efo_id is the MONDO ID stored in Disease.efo_id.
+        ot_query_id = efo_id  # MONDO IDs passed directly — OT v4 accepts them natively
+
         job = await self._load_job(job_id)
         if not job:
             return
         await self._start_job(job)
         try:
             async with OpenTargetsClient() as client:
-                associations = await client.get_disease_associations(efo_id)
+                associations = await client.get_disease_associations(ot_query_id)
 
             inserted = 0
             for assoc in associations:
@@ -177,14 +184,14 @@ class ETLOrchestrator:
                     continue
 
                 res_d = await self.db.execute(select(Drug).where(Drug.name == drug_name))
-                drug = res_d.scalar_one_or_none()
+                drug = res_d.scalars().first()
                 if not drug:
                     drug = Drug(name=drug_name, approval_status="unknown")
                     self.db.add(drug)
                     await self.db.flush()
 
                 res_g = await self.db.execute(select(Gene).where(Gene.symbol == gene_symbol))
-                gene = res_g.scalar_one_or_none()
+                gene = res_g.scalars().first()
                 if not gene:
                     gene = Gene(symbol=gene_symbol)
                     self.db.add(gene)
@@ -232,7 +239,7 @@ class ETLOrchestrator:
                             max_phase=int(float(mol.get("max_phase") or 0)),
                             approval_status="approved" if int(float(mol.get("max_phase") or 0)) >= 4 else "investigational",
                             molecular_formula=mol.get("molecule_properties", {}).get("full_molformula"),
-                            molecular_weight=mol.get("molecule_properties", {}).get("full_mwt"),
+                            molecular_weight=float(mwt) if (mwt := mol.get("molecule_properties", {}).get("full_mwt")) else None,
                         )
                         self.db.add(drug)
                         inserted += 1
@@ -260,7 +267,6 @@ class ETLOrchestrator:
 
             # UniProt returns {"results": [...], "facets": [...]}
             proteins = raw.get("results", []) if isinstance(raw, dict) else raw
-
             inserted = 0
             for prot in proteins:
                 if not isinstance(prot, dict):
@@ -269,7 +275,6 @@ class ETLOrchestrator:
                 symbol = genes[0].get("geneName", {}).get("value") if genes else None
                 if not symbol:
                     continue
-
                 res = await self.db.execute(select(Gene).where(Gene.symbol == symbol))
                 gene = res.scalar_one_or_none()
                 if not gene:
@@ -278,12 +283,22 @@ class ETLOrchestrator:
                         name=prot.get("proteinDescription", {})
                               .get("recommendedName", {})
                               .get("fullName", {}).get("value"),
-                        uniprot_id=prot.get("primaryAccession"),
-                        sequence_length=prot.get("sequence", {}).get("length"),
                     )
                     self.db.add(gene)
-                    inserted += 1
-
+                    await self.db.flush()
+                uniprot_acc = prot.get("primaryAccession")
+                if uniprot_acc:
+                    res2 = await self.db.execute(
+                        select(Protein).where(Protein.uniprot_id == uniprot_acc)
+                    )
+                    if not res2.scalar_one_or_none():
+                        protein = Protein(
+                            uniprot_id=uniprot_acc,
+                            gene_id=gene.id,
+                            sequence=prot.get("sequence", {}).get("value"),
+                        )
+                        self.db.add(protein)
+                        inserted += 1
             await self.db.commit()
             await self._finish_job(job, len(proteins), inserted)
             await self.update_datasource_status("uniprot", "success", records=len(proteins))
@@ -305,27 +320,77 @@ class ETLOrchestrator:
             # ClinicalTrials v2 returns {"studies": [...], "nextPageToken": ..., "totalCount": N}
             trials = raw.get("studies", []) if isinstance(raw, dict) else raw
 
+            # Resolve disease row once (case-insensitive name match)
+            res = await self.db.execute(
+                select(Disease).where(Disease.name.ilike(f"%{condition}%"))
+            )
+            disease = res.scalars().first()
+            if not disease:
+                logger.warning(
+                    f"[ClinicalTrials] no Disease row matching '{condition}' — nothing to link"
+                )
+                await self._finish_job(job, len(trials), 0)
+                await self.update_datasource_status("clinicaltrials", "success", records=len(trials))
+                return
+
             inserted = 0
             for trial in trials:
                 if not isinstance(trial, dict):
                     continue
-                nct_id = (trial.get("protocolSection", {})
-                               .get("identificationModule", {})
-                               .get("nctId"))
+
+                nct_id = (
+                    trial.get("protocolSection", {})
+                         .get("identificationModule", {})
+                         .get("nctId")
+                )
                 if not nct_id:
                     continue
 
-                res = await self.db.execute(select(Disease).where(Disease.name.ilike(f"%{condition}%")))
-                disease = res.scalar_one_or_none()
-                if not disease:
+                # ── Extract drug/intervention name ─────────────────────────
+                # Previous version stored only disease_id → _resolve_source in
+                # builder.py returned None → edge was silently dropped → 0 edges.
+                # Fix: parse the first DRUG-typed intervention so we can create a
+                # Drug node and link it drug_id → disease_id (a resolvable edge).
+                drug_name: str | None = None
+                arms = (
+                    trial.get("protocolSection", {})
+                         .get("armsInterventionsModule", {})
+                         .get("interventions", []) or []
+                )
+                # Only accept DRUG or BIOLOGICAL interventions — never BEHAVIORAL,
+                # PROCEDURE, DEVICE, DIETARY_SUPPLEMENT, OTHER, etc.
+                # Dropping the old fallback that accepted any intervention type
+                # is what was causing "Questionnaire", "fecal microbiome", etc.
+                # to appear as Drug rows in the database.
+                _CHEMICAL_TYPES = {"DRUG", "BIOLOGICAL"}
+                for arm in arms:
+                    if isinstance(arm, dict) and arm.get("type", "").upper() in _CHEMICAL_TYPES:
+                        drug_name = arm.get("name")
+                        if drug_name:
+                            break
+                # NO fallback — if no DRUG/BIOLOGICAL found, skip this trial entirely
+
+                if not drug_name:
+                    # No usable drug in this trial → skip (no edge possible)
                     continue
 
+                # Upsert Drug row
+                res_d = await self.db.execute(select(Drug).where(Drug.name == drug_name))
+                drug = res_d.scalars().first()
+                if not drug:
+                    drug = Drug(name=drug_name, approval_status="investigational")
+                    self.db.add(drug)
+                    await self.db.flush()
+
+                # Create DrugDisease interaction with both drug_id AND disease_id set
+                # so the builder can resolve source=Drug, target=Disease → real graph edge
                 self.db.add(Interaction(
                     interaction_type="ClinicalTrial",
+                    drug_id=drug.id,
                     disease_id=disease.id,
                     source_database="ClinicalTrials",
                     evidence_type="clinical_trial",
-                    is_directed=False,
+                    is_directed=True,
                     extra_metadata={
                         "nct_id": nct_id,
                         "phase": trial.get("phase"),

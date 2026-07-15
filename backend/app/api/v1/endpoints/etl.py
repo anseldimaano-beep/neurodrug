@@ -19,10 +19,79 @@ _CANCER_GENES = [
     "EGFR","TP53","PTEN","IDH1","IDH2","BRAF","KRAS","PIK3CA",
     "RB1","CDKN2A","MYC","MYCN","ALK","PDGFRA","NF1","VHL",
 ]
+# NOTE: CHEMBL614 (Pyrazinamide — a tuberculosis drug, unrelated to any of
+# the five cancers this project covers) used to be in this list. It was an
+# accidental collision with Temozolomide's *incorrect* seeded chembl_id,
+# which was also CHEMBL614 — meaning every time this default list ran, the
+# ChEMBL ETL upsert (matches by chembl_id) found the existing Temozolomide
+# row and silently renamed it "PYRAZINAMIDE" in place. Temozolomide's real
+# ChEMBL ID is CHEMBL810 (now fixed in seed_initial_data.py). Removed here.
 _CANCER_CHEMBL_IDS = [
-    "CHEMBL614","CHEMBL1201583","CHEMBL941","CHEMBL535","CHEMBL3788023",
+    "CHEMBL1201583","CHEMBL941","CHEMBL535",
     "CHEMBL25","CHEMBL1421","CHEMBL2068237",
 ]
+
+
+@router.post("/ingest/all_diseases", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_all_diseases(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("researcher")),
+):
+    """
+    Queue OpenTargets + ClinicalTrials ETL for every disease currently in the DB,
+    plus one STRING and one DGIdb job over the shared cancer-gene panel.
+
+    FIX C8: this previously only queued OpenTargets + ClinicalTrials, so Gene
+    nodes never populated — STRING (Gene-Gene) and DGIdb (Drug-Gene) were
+    never triggered by this endpoint at all, even though the docstring billed
+    it as the one-shot fix for "1 node, 0 edges". All three sources are
+    needed before Genes(N) shows anything but 0 in the graph explorer.
+
+      - OpenTargets: passes the MONDO ID stored on each Disease row directly
+        as efoId — Open Targets' GraphQL API accepts MONDO-format IDs natively.
+      - ClinicalTrials: uses the disease name as the condition search term.
+      - STRING / DGIdb: run once each over the shared cancer-gene panel, since
+        these sources are gene-centric rather than disease-specific.
+    """
+    from sqlalchemy import select as _select
+    from app.models.domain import Disease as _Disease
+
+    result = await db.execute(_select(_Disease).where(_Disease.is_deleted == False))
+    diseases = result.scalars().all()
+
+    orch = ETLOrchestrator(db)
+    queued = []
+    for disease in diseases:
+        efo_id = disease.efo_id
+        condition = disease.name.lower()
+
+        ot_job = await orch.create_job("opentargets")
+        run_etl_opentargets.delay(ot_job.id, efo_id)
+
+        ct_job = await orch.create_job("clinicaltrials")
+        run_etl_clinicaltrials.delay(ct_job.id, condition)
+
+        queued.append({
+            "disease": disease.name,
+            "efo_id": efo_id,
+            "opentargets_job_id": ot_job.id,
+            "clinicaltrials_job_id": ct_job.id,
+        })
+        logger.info(f"[ETL] queued OT job={ot_job.id} + CT job={ct_job.id} for {disease.name}")
+
+    string_job = await orch.create_job("string")
+    run_etl_string.delay(string_job.id, _CANCER_GENES, 700)
+    dgidb_job = await orch.create_job("dgidb")
+    run_etl_dgidb.delay(dgidb_job.id, _CANCER_GENES)
+    logger.info(f"[ETL] queued STRING job={string_job.id} + DGIdb job={dgidb_job.id} "
+                f"over {len(_CANCER_GENES)} genes")
+
+    return {
+        "queued": queued,
+        "total": len(queued),
+        "string_job_id": string_job.id,
+        "dgidb_job_id": dgidb_job.id,
+    }
 
 
 @router.post("/ingest/opentargets", status_code=status.HTTP_202_ACCEPTED)

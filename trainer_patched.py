@@ -1,0 +1,138 @@
+import os
+import json
+import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from typing import Dict, Optional, List, Tuple
+from app.ml.models.hgt import NeuroDrugHGT
+from app.ml.metrics import evaluate_all
+from app.core.logging import logger
+
+
+class HGTTrainer:
+    def __init__(
+        self,
+        model: NeuroDrugHGT,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        lr: float = 3e-4,
+        weight_decay: float = 1e-5,
+        max_epochs: int = 200,
+        patience: int = 25,
+        grad_clip: float = 1.0,
+        metadata: Optional[Tuple] = None,   # ← FIX: save graph topology with checkpoint
+    ):
+        self.model = model.to(device)
+        self.device = device
+        self.optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max_epochs, eta_min=1e-5)
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.grad_clip = grad_clip
+        self.best_val_auc = 0.0
+        self.epochs_no_improve = 0
+        self.history: List[Dict] = []
+        self.checkpoint_dir = "checkpoints"
+        self.metadata = metadata           # ← graph (node_types, edge_types) tuple
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+    def train_epoch(self, data_loader):
+        self.model.train()
+        total_loss = 0
+        for batch in data_loader:
+            self.optimizer.zero_grad()
+            x_dict = {k: v.to(self.device) for k, v in batch.x_dict.items()}
+            edge_index_dict = {k: v.to(self.device) for k, v in batch.edge_index_dict.items()}
+            src_nodes = batch.src_nodes.to(self.device)
+            dst_nodes = batch.dst_nodes.to(self.device)
+            labels = batch.labels.to(self.device)
+
+            logits = self.model(x_dict, edge_index_dict, src_nodes, dst_nodes, batch.src_type, batch.dst_type)
+            loss = F.binary_cross_entropy_with_logits(logits, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+            total_loss += loss.item()
+        return total_loss / len(data_loader)
+
+    @torch.no_grad()
+    def evaluate(self, data_loader):
+        self.model.eval()
+        all_labels = []
+        all_scores = []
+        for batch in data_loader:
+            x_dict = {k: v.to(self.device) for k, v in batch.x_dict.items()}
+            edge_index_dict = {k: v.to(self.device) for k, v in batch.edge_index_dict.items()}
+            src_nodes = batch.src_nodes.to(self.device)
+            dst_nodes = batch.dst_nodes.to(self.device)
+            labels = batch.labels.cpu().numpy()
+
+            logits = self.model(x_dict, edge_index_dict, src_nodes, dst_nodes, batch.src_type, batch.dst_type)
+            scores = torch.sigmoid(logits).cpu().numpy()
+            all_labels.extend(labels)
+            all_scores.extend(scores)
+
+        import numpy as np
+        metrics = evaluate_all(np.array(all_labels), np.array(all_scores))
+        return metrics
+
+    def _flush_history(self):
+        """Write history to disk after every epoch so /api/v1/training/history stays live."""
+        history_path = os.path.join(self.checkpoint_dir, "training_history.json")
+        with open(history_path, "w") as f:
+            json.dump(self.history, f, indent=2)
+
+    def fit(self, train_loader, val_loader):
+        for epoch in range(1, self.max_epochs + 1):
+            train_loss = self.train_epoch(train_loader)
+            val_metrics = self.evaluate(val_loader)
+            val_auc = val_metrics["roc_auc"]
+            self.history.append({"epoch": epoch, "train_loss": train_loss, **val_metrics})
+            self.scheduler.step()
+
+            # ← write per-epoch so the frontend training tab can poll live progress
+            self._flush_history()
+
+            logger.info(f"Epoch {epoch}/{self.max_epochs} — loss: {train_loss:.4f} — val_auc: {val_auc:.4f}")
+
+            if val_auc > self.best_val_auc:
+                self.best_val_auc = val_auc
+                self.epochs_no_improve = 0
+                self.save_checkpoint("best_model.pt")
+            else:
+                self.epochs_no_improve += 1
+
+            if epoch % 10 == 0:
+                self.save_checkpoint(f"checkpoint_epoch_{epoch}.pt")
+
+            if self.epochs_no_improve >= self.patience:
+                logger.info(f"Early stopping triggered at epoch {epoch}")
+                break
+
+        # Final flush (covers the last epoch if loop exited normally)
+        self._flush_history()
+
+    def save_checkpoint(self, filename: str):
+        path = os.path.join(self.checkpoint_dir, filename)
+        ckpt = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "best_val_auc": self.best_val_auc,
+        }
+        # ── FIX: save graph topology so inference can verify it matches ──
+        if self.metadata is not None:
+            ckpt["metadata"] = self.metadata
+        torch.save(ckpt, path)
+        logger.info(f"Checkpoint saved: {path}")
+
+    def load_checkpoint(self, filename: str):
+        path = os.path.join(self.checkpoint_dir, filename)
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.best_val_auc = checkpoint["best_val_auc"]
+        if "metadata" in checkpoint:
+            self.metadata = checkpoint["metadata"]
+        logger.info(f"Checkpoint loaded: {path}")

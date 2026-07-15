@@ -3,12 +3,32 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
+class DrugResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    chembl_id: Optional[str] = None
+    approval_status: Optional[str] = None
+    max_phase: Optional[int] = None
+
+
+class DiseaseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    efo_id: Optional[str] = None
+    category: Optional[str] = None
+
+
 class PredictionBase(BaseModel):
     drug_id: int
     disease_id: int
     prediction_score: float = Field(..., ge=0.0, le=1.0)
     confidence_score: Optional[float] = None
     novelty_score: Optional[float] = None
+    # FIX: evidence_score exists on the Prediction domain model (DB column)
+    # but was missing here, so the dashboard "Evidence" column always showed "—".
+    evidence_score: Optional[float] = None
     rank: Optional[int] = None
 
 
@@ -24,15 +44,14 @@ class PredictionResponse(PredictionBase):
     target_genes: Optional[List[str]] = None
     affected_pathways: Optional[List[str]] = None
     created_at: datetime
-    drug: Optional[Dict[str, Any]] = None
-    disease: Optional[Dict[str, Any]] = None
-
+    drug: Optional[DrugResponse] = None
+    disease: Optional[DiseaseResponse] = None
 
 class RepurposingRequest(BaseModel):
-    disease_efo_id: str = Field(..., description="EFO disease identifier")
+    disease_efo_id: Optional[str] = Field(None, description="EFO disease identifier")
+    disease_mondo_id: Optional[str] = Field(None, description="MONDO disease identifier e.g. MONDO_0004979")
     model_version_id: int = Field(..., description="Model version to use for inference")
     top_k: int = Field(default=20, ge=1, le=200)
-
 
 class RepurposingResponse(BaseModel):
     disease: str

@@ -1,20 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { KnowledgeGraphExplorer } from "@/components/knowledge-graph-explorer";
-import { PredictionDashboard } from "@/components/prediction-dashboard";
+import KnowledgeGraphExplorer from "@/components/knowledge-graph-explorer";
+import PredictionDashboard from "@/components/prediction-dashboard";
+import EvidenceValidation from "@/components/evidence-validation";
+import ModelTraining from "@/components/model-training";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function Home() {
-  const [activeDisease, setActiveDisease] = useState<string>("EFO_0000519");
+  const [activeDisease, setActiveDisease] = useState<string>("MONDO_0018177");
 
   const diseases = [
-    { id: "EFO_0000519", name: "Glioblastoma" },
-    { id: "EFO_0000621", name: "Neuroblastoma" },
-    { id: "EFO_0002559", name: "Medulloblastoma" },
-    { id: "EFO_0000400", name: "Ewing Sarcoma" },
-    { id: "EFO_0003165", name: "DIPG" },
+    { id: "MONDO_0018177", name: "Glioblastoma Multiforme" },
+    { id: "MONDO_0005072", name: "Neuroblastoma" },
+    { id: "MONDO_0012817", name: "Ewing Sarcoma" },
+    { id: "MONDO_0007959", name: "Medulloblastoma" },
+    { id: "MONDO_0019004", name: "Wilms Tumor" },
   ];
 
   return (
@@ -71,27 +73,11 @@ export default function Home() {
           </TabsContent>
 
           <TabsContent value="training" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Model Training Center</CardTitle>
-                <CardDescription>Launch HGT training jobs, monitor convergence, and compare baseline models.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">Connect to /api/v1/training endpoints to manage experiments.</p>
-              </CardContent>
-            </Card>
+            <ModelTraining />
           </TabsContent>
 
           <TabsContent value="evidence" className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Evidence Validation Center</CardTitle>
-                <CardDescription>Cross-reference predictions against PubMed, ClinicalTrials.gov, and pathway databases.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">Validation pipeline runs automatically after each prediction batch.</p>
-              </CardContent>
-            </Card>
+            <EvidenceValidation diseaseId={activeDisease} />
           </TabsContent>
         </Tabs>
       </div>

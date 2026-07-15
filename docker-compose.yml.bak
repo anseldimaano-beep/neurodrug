@@ -1,0 +1,236 @@
+
+# NeuroDrug v4 — complete local stack
+# Usage:  cp .env.example .env && docker-compose up
+#
+# CHANGES vs previous version
+# ────────────────────────────
+# C6 (already applied): NEXT_PUBLIC_API_URL=http://localhost:8000
+# C5 (already applied): frontend service no longer mounts ./frontend:/app
+# H5 FIX: redis service now mounts redis_data volume so Celery queue and
+#         cache survive container restarts.
+
+x-backend-base: &backend-base
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    - POSTGRES_HOST=postgres
+    - REDIS_URL=redis://redis:6379/0
+    - CELERY_BROKER_URL=redis://redis:6379/1
+    - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    - MLFLOW_TRACKING_URI=http://mlflow:5000
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ── API ─────────────────────────────────────────────────────────────────
+  api:
+    <<: *backend-base
+    container_name: neurodrug_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app          # hot-reload for local development
+      - checkpoints:/app/checkpoints       # named volume
+      - ./checkpoints:/app/checkpoints     # bind mount — same target
+      - model_registry:/app/model_registry
+      - mlruns:/app/mlruns
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --log-level info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Celery Worker ────────────────────────────────────────────────────────
+  worker:
+    <<: *backend-base
+    container_name: neurodrug_worker
+    healthcheck:
+      disable: true
+    volumes:
+      - ./backend:/app
+      - checkpoints:/app/checkpoints
+    command: >
+      celery -A celery_app worker
+        --loglevel=info
+        --concurrency=2
+        -Q celery,etl,training
+
+  # ── Celery Beat (scheduler) ──────────────────────────────────────────────
+  scheduler:
+    <<: *backend-base
+    container_name: neurodrug_scheduler
+    healthcheck:
+      disable: true
+    command: celery -A celery_app beat --loglevel=info
+
+  # ── Flower (Celery monitoring) ───────────────────────────────────────────
+  flower:
+    <<: *backend-base
+    container_name: neurodrug_flower
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    ports:
+      - "5555:5555"
+    command: >
+      celery -A celery_app flower
+        --port=5555
+        --broker=${CELERY_BROKER_URL:-redis://redis:6379/1}
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: neurodrug_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-neurodrug}
+      POSTGRES_USER: ${POSTGRES_USER:-neurodrug_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-neurodrug_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-neurodrug_user} -d ${POSTGRES_DB:-neurodrug}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  # FIX H5: redis_data volume is now actually mounted here.
+  # Previously the volume was declared at the bottom but never mounted,
+  # so Redis state (Celery queues, cache) was ephemeral and lost on every
+  # `docker-compose down` or container restart.
+  redis:
+    image: redis:7-alpine
+    container_name: neurodrug_redis
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save 60 1
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data                  # ← was missing
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis Exporter ───────────────────────────────────────────────────────
+  # Prometheus cannot scrape redis:6379 directly (HTTP vs Redis protocol).
+  # This exporter speaks Redis, then exposes /metrics over HTTP on :9121.
+  redis_exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: neurodrug_redis_exporter
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    ports:
+      - "9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Postgres Exporter ─────────────────────────────────────────────────────
+  # Same issue: postgres:5432 expects the PG wire protocol, not HTTP.
+  # This exporter bridges the gap and exposes /metrics on :9187.
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: neurodrug_postgres_exporter
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-neurodrug_user}:${POSTGRES_PASSWORD:-neurodrug_pass}@postgres:5432/${POSTGRES_DB:-neurodrug}?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── MLflow ───────────────────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.1
+    container_name: neurodrug_mlflow
+    environment:
+      - MLFLOW_HOST=0.0.0.0
+      - MLFLOW_PORT=5000
+    command: >
+      bash -c "pip install psycopg2-binary -q && mlflow server
+        --backend-store-uri postgresql://${POSTGRES_USER:-neurodrug_user}:${POSTGRES_PASSWORD:-neurodrug_pass}@postgres/${POSTGRES_DB:-neurodrug}_mlflow
+        --default-artifact-root /mlruns
+        --host 0.0.0.0
+        --port 5000"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlruns:/mlruns
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  # C5 (already applied): no source-code volume — the built standalone image is used as-is.
+  # C6 (already applied): http://localhost:8000 is reachable from the browser.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8000   # baked into browser bundle
+        - INTERNAL_API_URL=http://api:8000            # used by Next.js server proxy
+    container_name: neurodrug_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - api
+
+  # ── Prometheus ───────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: neurodrug_prometheus
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: neurodrug_grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana-dashboard.json:/etc/grafana/dashboards/neurodrug.json:ro
+      - ./infrastructure/monitoring/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  redis_data:        # now mounted above
+  prometheus_data:
+  grafana_data:
+  checkpoints:
+  model_registry:
+  mlruns:

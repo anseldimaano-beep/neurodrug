@@ -1,0 +1,100 @@
+[
+  {
+    "variant": "full_model",
+    "edge_categories": [
+      "DrugTarget",
+      "GeneDisease",
+      "PPI"
+    ],
+    "best_val_auc": 0.9611464763374485,
+    "final_metrics": {
+      "epoch": 34,
+      "train_loss": 0.16628172198260152,
+      "roc_auc": 0.9580600565843621,
+      "average_precision": 0.7789669865158297,
+      "hits@10": 0.034722222222222224,
+      "hits@20": 0.09722222222222222,
+      "mrr": 0.02221597360441297,
+      "ndcg@10": 0.38820476264318793
+    },
+    "epochs_run": 34,
+    "delta_auc_vs_full": 0.0
+  },
+  {
+    "variant": "ppi_only",
+    "edge_categories": [
+      "PPI"
+    ],
+    "best_val_auc": 0.9778002829218108,
+    "final_metrics": {
+      "epoch": 25,
+      "train_loss": 0.14240857717153188,
+      "roc_auc": 0.9764821244855968,
+      "average_precision": 0.897029352146045,
+      "hits@10": 0.0625,
+      "hits@20": 0.11805555555555555,
+      "mrr": 0.0362186100780215,
+      "ndcg@10": 0.92663607790064
+    },
+    "epochs_run": 25,
+    "delta_auc_vs_full": 0.0167
+  },
+  {
+    "variant": "drug_target_only",
+    "edge_categories": [
+      "DrugTarget"
+    ],
+    "best_val_auc": 0.9798418209876544,
+    "final_metrics": {
+      "epoch": 26,
+      "train_loss": 0.14170830938461665,
+      "roc_auc": 0.9772698045267489,
+      "average_precision": 0.8923724675123726,
+      "hits@10": 0.0625,
+      "hits@20": 0.11805555555555555,
+      "mrr": 0.03384756976250908,
+      "ndcg@10": 0.8611375561264456
+    },
+    "epochs_run": 26,
+    "delta_auc_vs_full": 0.0187
+  },
+  {
+    "variant": "gene_disease_only",
+    "edge_categories": [
+      "GeneDisease"
+    ],
+    "best_val_auc": 0.9968814300411523,
+    "final_metrics": {
+      "epoch": 60,
+      "train_loss": 0.03394119642247018,
+      "roc_auc": 0.9968814300411522,
+      "average_precision": 0.9882948566435277,
+      "hits@10": 0.06944444444444445,
+      "hits@20": 0.1388888888888889,
+      "mrr": 0.038428822605128775,
+      "ndcg@10": 1.0
+    },
+    "epochs_run": 60,
+    "delta_auc_vs_full": 0.0357
+  },
+  {
+    "variant": "ppi_plus_drug_target",
+    "edge_categories": [
+      "DrugTarget",
+      "PPI"
+    ],
+    "best_val_auc": 0.9285783179012346,
+    "final_metrics": {
+      "epoch": 18,
+      "train_loss": 0.2602449736079654,
+      "roc_auc": 0.9140303497942387,
+      "average_precision": 0.6463632149757228,
+      "hits@10": 0.0,
+      "hits@20": 0.034722222222222224,
+      "mrr": 0.01423017896484523,
+      "ndcg@10": 0.0
+    },
+    "epochs_run": 18,
+    "delta_auc_vs_full": -0.0326
+  }
+]

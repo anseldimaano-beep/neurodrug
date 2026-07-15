@@ -20,4 +20,4 @@ class ETLJobResponse(BaseModel):
     error_log: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, get_current_active_user
 from app.models.domain import User, Prediction, Drug, Disease
@@ -23,14 +24,16 @@ async def list_predictions(
     current_user: User = Depends(get_current_active_user),
 ):
     """List all drug repurposing predictions with optional filters."""
-    query = select(Prediction).where(
+    query = select(Prediction).options(
+        selectinload(Prediction.drug),
+        selectinload(Prediction.disease),
+    ).where(
         Prediction.is_deleted == False,
         Prediction.prediction_score >= min_score,
     )
     if disease_id:
         query = query.where(Prediction.disease_id == disease_id)
     elif disease_efo_id:
-        # Join to Disease to filter by EFO ID or name
         disease_result = await db.execute(
             select(Disease).where(
                 (Disease.efo_id == disease_efo_id) |
@@ -51,7 +54,11 @@ async def get_prediction(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(select(Prediction).where(Prediction.id == prediction_id))
+    result = await db.execute(
+        select(Prediction)
+        .options(selectinload(Prediction.drug), selectinload(Prediction.disease))
+        .where(Prediction.id == prediction_id)
+    )
     pred = result.scalar_one_or_none()
     if not pred:
         raise HTTPException(status_code=404, detail=f"Prediction {prediction_id} not found")
@@ -68,6 +75,7 @@ async def run_repurposing(
     service = DrugRepurposingService(db)
     candidates = await service.run_inference(
         disease_efo_id=request.disease_efo_id,
+        disease_mondo_id=request.disease_mondo_id,
         model_version_id=request.model_version_id,
         top_k=request.top_k,
     )

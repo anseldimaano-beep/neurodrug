@@ -1,7 +1,8 @@
 from typing import Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from app.models.domain import Prediction, Interaction, Gene, Drug, Disease
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from app.models.domain import Prediction, Interaction, Gene
 from app.core.logging import logger
 
 
@@ -10,7 +11,14 @@ class BiologicalValidationService:
         self.db = db
 
     async def validate_prediction(self, prediction_id: int) -> Dict[str, Any]:
-        pred_result = await self.db.execute(select(Prediction).where(Prediction.id == prediction_id))
+        pred_result = await self.db.execute(
+            select(Prediction)
+            .options(
+                selectinload(Prediction.drug),
+                selectinload(Prediction.disease),
+            )
+            .where(Prediction.id == prediction_id)
+        )
         prediction = pred_result.scalar_one_or_none()
         if not prediction or not prediction.drug or not prediction.disease:
             return {}
@@ -18,25 +26,40 @@ class BiologicalValidationService:
         drug_id = prediction.drug_id
         disease_id = prediction.disease_id
 
+        # Drug targets — eagerly load source_gene to avoid lazy-load crash
         target_result = await self.db.execute(
             select(Interaction)
+            .options(selectinload(Interaction.source_gene))
             .where(Interaction.drug_id == drug_id)
             .where(Interaction.interaction_type == "DrugTarget")
         )
         targets = target_result.scalars().all()
-        target_genes = [t.source_gene.symbol for t in targets if t.source_gene]
+        target_genes = [
+            t.source_gene.symbol
+            for t in targets
+            if t.source_gene is not None
+        ]
 
+        # Disease-associated genes — eagerly load source_gene
         disease_assoc_result = await self.db.execute(
             select(Interaction)
+            .options(selectinload(Interaction.source_gene))
             .where(Interaction.disease_id == disease_id)
             .where(Interaction.interaction_type == "GeneDisease")
         )
-        disease_genes = [a.source_gene.symbol for a in disease_assoc_result.scalars().all() if a.source_gene]
+        disease_genes = [
+            a.source_gene.symbol
+            for a in disease_assoc_result.scalars().all()
+            if a.source_gene is not None
+        ]
 
         overlap = set(target_genes) & set(disease_genes)
         overlap_score = len(overlap) / max(len(target_genes), 1)
-
-        rationale = f"Drug targets {len(target_genes)} genes. {len(overlap)} overlap with disease-associated genes ({', '.join(list(overlap)[:5])})."
+        rationale = (
+            f"Drug targets {len(target_genes)} genes. "
+            f"{len(overlap)} overlap with disease-associated genes"
+            + (f" ({', '.join(list(overlap)[:5])})." if overlap else ".")
+        )
 
         result = {
             "prediction_id": prediction_id,
@@ -47,7 +70,10 @@ class BiologicalValidationService:
             "biological_rationale": rationale,
             "pathway_coverage": "pending",
         }
+
         prediction.target_genes = list(overlap)
         await self.db.commit()
-        logger.info(f"Biological validation for prediction {prediction_id}: overlap={len(overlap)}")
+        logger.info(
+            f"Biological validation for prediction {prediction_id}: overlap={len(overlap)}"
+        )
         return result

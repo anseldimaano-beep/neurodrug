@@ -3,7 +3,7 @@ import axios from "axios"
 // FIX C6 (already applied upstream): use localhost so the browser can reach the API.
 // For containerised deployments override NEXT_PUBLIC_API_URL at build time.
 // Always use relative URLs — Next.js proxy forwards /api/* to the backend container
-const API_BASE = ""
+const API_BASE = typeof window !== "undefined" ? "http://localhost:8000" : "http://api:8000"
 
 export const apiClient = axios.create({
   baseURL: `${API_BASE}/api/v1`,
@@ -80,6 +80,13 @@ export const api = {
   // Validation — C4: now calls the /run endpoint added to the backend
   validatePrediction: (predictionId: number) =>
     apiClient.post("/validation/run", { prediction_id: predictionId }),
+
+  // FIX C9: bulk-read already-persisted evidence (no external API calls,
+  // so it's safe to call on every page load / tab switch).
+  getBulkEvidence: (predictionIds: number[]) =>
+    apiClient.get("/validation/bulk", {
+      params: { prediction_ids: predictionIds.join(",") },
+    }),
 
   // Health
   health: () => apiClient.get("/health"),

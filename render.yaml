@@ -1,0 +1,60 @@
+databases:
+  - name: neurodrug-db
+    plan: free
+    databaseName: neurodrug
+    user: neurodrug_user
+
+services:
+  # ── API (inference only — no celery/worker/mlflow/prometheus/grafana) ──
+  - type: web
+    name: neurodrug-api
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /api/v1/health/
+    envVars:
+      - key: POSTGRES_HOST
+        fromDatabase: { name: neurodrug-db, property: host }
+      - key: POSTGRES_PORT
+        fromDatabase: { name: neurodrug-db, property: port }
+      - key: POSTGRES_USER
+        fromDatabase: { name: neurodrug-db, property: user }
+      - key: POSTGRES_PASSWORD
+        fromDatabase: { name: neurodrug-db, property: password }
+      - key: POSTGRES_DB
+        fromDatabase: { name: neurodrug-db, property: database }
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: ENVIRONMENT
+        value: production
+      # Redis/MLflow/Sentry are optional at runtime — health check
+      # marks them "degraded" not "down" if unreachable. Leave blank
+      # unless you stand up a Redis instance too.
+      - key: REDIS_URL
+        value: redis://localhost:6379/0
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+      - key: SENTRY_DSN
+        value: ""
+
+  # ── Frontend (Next.js, standalone build) ──
+  - type: web
+    name: neurodrug-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: free
+    envVars:
+      # Fill this in AFTER the API's first deploy — it's a build-time
+      # ARG baked into the browser bundle, so it must be set as a
+      # Docker Build Argument in the Render dashboard (Settings →
+      # Build & Deploy → Docker Build Arguments), not just an env var.
+      - key: NEXT_PUBLIC_API_URL
+        value: https://neurodrug-api.onrender.com
+      - key: INTERNAL_API_URL
+        value: https://neurodrug-api.onrender.com

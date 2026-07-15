@@ -16,61 +16,10 @@ class DrugRepurposingPredictor:
         self.model.eval()
         self.device = device
 
-    # ------------------------------------------------------------------ #
-    # FIX C1: load_checkpoint was missing; repurposing.py calls it on     #
-    # every inference run.  Without this method the service crashes with   #
-    # AttributeError before any prediction is made.                        #
-    # ------------------------------------------------------------------ #
-    def load_checkpoint(self, checkpoint_path: str) -> None:
-        """Load model weights from a checkpoint, skipping any keys whose
-        shapes don't match the current model (e.g. trained on dummy data
-        with different graph topology than inference graph)."""
-        path = Path(checkpoint_path)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Checkpoint not found: {checkpoint_path}. "
-                "Run training first or verify MODEL_CHECKPOINT_PATH."
-            )
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        state_dict = (
-            checkpoint.get("model_state_dict", checkpoint)
-            if isinstance(checkpoint, dict)
-            else checkpoint
-        )
-
-        # Filter to only keys that exist in the model AND have matching shapes.
-        # HGTConv uses lazy init — some params have no shape until forward() runs,
-        # so we catch RuntimeError and skip those keys too.
-        current = self.model.state_dict()
-        compatible = {}
-        skipped = []
-        for key, val in state_dict.items():
-            if key not in current:
-                skipped.append(key)
-                continue
-            try:
-                if current[key].shape == val.shape:
-                    compatible[key] = val
-                else:
-                    skipped.append(key)
-            except RuntimeError:
-                # Uninitialized lazy parameter — skip it
-                skipped.append(key)
-
-        if skipped:
-            logger.warning(
-                f"Skipped {len(skipped)} checkpoint keys due to shape mismatch "
-                f"or missing in current model (will use random init): {skipped[:3]}..."
-            )
-
-        # Merge compatible weights into current state and reload
-        current.update(compatible)
-        self.model.load_state_dict(current)
-        self.model.eval()
-        logger.info(
-            f"Loaded {len(compatible)}/{len(state_dict)} weights "
-            f"from checkpoint {checkpoint_path}"
-        )
+    # NOTE: load_checkpoint is defined once, further down this class, as a
+    # plain strict load_state_dict call. (A duplicate, dead first definition
+    # used to live here — Python silently used whichever was defined last,
+    # so it never actually ran. Removed to avoid editing dead code again.)
 
     @torch.no_grad()
     def predict_all_pairs(
@@ -94,7 +43,7 @@ class DrugRepurposingPredictor:
         n_drug    = x_dict["Drug"].size(0)    if "Drug"    in x_dict else drug_nodes.max().item() + 1
         n_disease = x_dict["Disease"].size(0) if "Disease" in x_dict else disease_nodes.max().item() + 1
         if "Drug" not in emb_dict:
-            emb_dict["Drug"] = torch.zeros(n_drug, hidden, device=self.device)
+            emb_dict["Drug"] = torch.zeros(n_drug, hidden, device=self.device)  # all drugs → same vector
         if "Disease" not in emb_dict:
             emb_dict["Disease"] = torch.zeros(n_disease, hidden, device=self.device)
 
@@ -148,3 +97,16 @@ class DrugRepurposingPredictor:
                 }
             )
         return results
+
+    def load_checkpoint(self, checkpoint_path: str) -> None:
+        import torch, os
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}')
+        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        state = ckpt.get('model_state_dict', ckpt)
+        self.model.load_state_dict(state)  # strict=True by default — raises on any mismatch
+        self.model.eval()
+        logger.warning(
+            f"load_checkpoint: strict load_state_dict OK — all {len(state)} tensors "
+            f"from {checkpoint_path} matched and loaded (no mismatch, or this would have raised)."
+        )

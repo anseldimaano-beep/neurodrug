@@ -1,7 +1,13 @@
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from app.core.config import settings
 from app.core.logging import logger
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
 
 
 class OpenTargetsClient:
@@ -16,9 +22,9 @@ class OpenTargetsClient:
         await self.client.aclose()
 
     @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def _query(self, query: str, variables: dict = None):
@@ -26,17 +32,20 @@ class OpenTargetsClient:
         response = await self.client.post(
             self.url, json=payload, headers={"Content-Type": "application/json"}
         )
-        response.raise_for_status()
+        if not response.is_success:
+            logger.error(f"[OpenTargets] HTTP {response.status_code}: {response.text[:500]}")
+            response.raise_for_status()
         data = response.json()
         if "errors" in data:
+            logger.error(f"[OpenTargets] GraphQL errors: {data['errors']}")
             raise ValueError(f"GraphQL errors: {data['errors']}")
         return data["data"]
 
-    async def get_disease_associations(self, efo_id: str, size: int = 500):
+    async def get_disease_associations(self, efo_id: str):
         query = """
-        query DiseaseAssociations($efoId: String!, $size: Int!) {
+        query DiseaseAssociations($efoId: String!) {
           disease(efoId: $efoId) {
-            associatedTargets(page: {index: 0, size: $size}) {
+            associatedTargets(page: {index: 0, size: 200}) {
               rows {
                 target {
                   id
@@ -50,8 +59,15 @@ class OpenTargetsClient:
           }
         }
         """
-        result = await self._query(query, {"efoId": efo_id, "size": size})
-        rows = result.get("disease", {}).get("associatedTargets", {}).get("rows", [])
+        result = await self._query(query, {"efoId": efo_id})
+        if result is None:
+            logger.warning(f"[OpenTargets] null result for {efo_id}")
+            return []
+        disease_data = result.get("disease")
+        if disease_data is None:
+            logger.warning(f"[OpenTargets] no disease found for {efo_id}")
+            return []
+        rows = (disease_data.get("associatedTargets") or {}).get("rows", []) or []
         associations = []
         for row in rows:
             target = row.get("target", {})
