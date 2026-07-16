@@ -1,7 +1,9 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from datetime import datetime
-from typing import List
+from typing import List, Dict
+from itertools import combinations
+from collections import Counter, defaultdict
 
 from app.models.domain import Drug, Disease, Gene, Protein, Interaction, DataSource, ETLJob
 from app.services.etl.string import StringClient
@@ -11,6 +13,7 @@ from app.services.etl.chembl import ChEMBLClient
 from app.services.etl.uniprot import UniProtClient
 from app.services.etl.clinicaltrials import ClinicalTrialsClient
 from app.services.etl.gdc import GDCClient
+from app.services.etl.cbioportal import CBioPortalClient
 from app.core.logging import logger
 
 # ── Open Targets disease ID mapping ────────────────────────────────────────────
@@ -409,7 +412,23 @@ class ETLOrchestrator:
             raise
 
     # ── GDC (TCGA) ─────────────────────────────────────────────────────────
-    async def ingest_gdc(self, job_id: int, project: str, gene_ids: List[str] = None):
+    async def ingest_gdc(self, job_id: int, project: str, gene_ids: List[str] = None,
+                          min_co_occurrences: int = 2):
+        """
+        Ingest somatic mutation records from GDC, upsert Gene nodes for
+        every mutated gene (existing behavior), AND derive Edge type 4 —
+        Co-mutation edges from co-occurrence of mutations within the same
+        patient case (new).
+
+        FIX C10 / Edge type 4: this previously only created Gene nodes and
+        discarded the rest of each mutation record, so no Gene-Gene edges
+        were ever derived from somatic mutation data even though the client
+        fetched it. GDCClient.query_ssms now also requests
+        occurrence.case.case_id, which lets us group mutations by patient
+        and count how often each gene pair is mutated together in the same
+        case. Pairs co-occurring in fewer than min_co_occurrences distinct
+        cases are dropped as noise rather than stored as an edge.
+        """
         job = await self._load_job(job_id)
         if not job:
             return
@@ -421,8 +440,10 @@ class ETLOrchestrator:
             # GDC returns {"data": {"hits": [...], "pagination": {...}}, "warnings": {}}
             hits = raw.get("data", {}).get("hits", []) if isinstance(raw, dict) else []
 
-            inserted = 0
-            seen = set()
+            genes_seen = set()
+            case_genes: Dict[str, set] = defaultdict(set)
+            inserted_genes = 0
+
             for mut in hits:
                 if not isinstance(mut, dict):
                     continue
@@ -438,21 +459,205 @@ class ETLOrchestrator:
                                      .get("gene", {})
                                      .get("symbol")
                             )
-                if not gene_symbol or gene_symbol in seen:
+                if not gene_symbol:
                     continue
-                seen.add(gene_symbol)
 
-                res = await self.db.execute(select(Gene).where(Gene.symbol == gene_symbol))
-                gene = res.scalar_one_or_none()
-                if not gene:
-                    gene = Gene(symbol=gene_symbol, is_oncogene=True)
-                    self.db.add(gene)
-                    inserted += 1
+                if gene_symbol not in genes_seen:
+                    genes_seen.add(gene_symbol)
+                    res = await self.db.execute(select(Gene).where(Gene.symbol == gene_symbol))
+                    gene = res.scalar_one_or_none()
+                    if not gene:
+                        gene = Gene(symbol=gene_symbol, is_oncogene=True)
+                        self.db.add(gene)
+                        await self.db.flush()
+                        inserted_genes += 1
+
+                # Record which patient case(s) carried this mutation, so we
+                # can derive co-occurrence edges below. A single ssm can
+                # have multiple occurrences (multiple cases with the same
+                # mutation).
+                for occ in (mut.get("occurrence") or []):
+                    case = occ.get("case", {}) if isinstance(occ, dict) else {}
+                    case_id = case.get("case_id")
+                    if case_id:
+                        case_genes[case_id].add(gene_symbol)
+
+            # ── Edge type 4: Co-mutation ─────────────────────────────────
+            # For every case with 2+ distinct mutated genes, count every
+            # unordered gene pair as one co-occurrence across the cohort.
+            pair_counts: Counter = Counter()
+            for genes_in_case in case_genes.values():
+                if len(genes_in_case) < 2:
+                    continue
+                for sym_a, sym_b in combinations(sorted(genes_in_case), 2):
+                    pair_counts[(sym_a, sym_b)] += 1
+
+            total_cases = len(case_genes)
+            inserted_edges = 0
+            for (sym_a, sym_b), co_count in pair_counts.items():
+                if co_count < min_co_occurrences:
+                    continue
+
+                res_a = await self.db.execute(select(Gene).where(Gene.symbol == sym_a))
+                gene_a = res_a.scalar_one_or_none()
+                res_b = await self.db.execute(select(Gene).where(Gene.symbol == sym_b))
+                gene_b = res_b.scalar_one_or_none()
+                if not gene_a or not gene_b:
+                    continue
+
+                # Dedup manually: drug_id/disease_id are NULL for these
+                # edges, and NULL != NULL in the table's unique constraint,
+                # so re-running this job would otherwise silently duplicate
+                # every pair instead of being caught by the DB.
+                existing = await self.db.execute(
+                    select(Interaction).where(
+                        Interaction.interaction_type == "CoMutation",
+                        Interaction.source_gene_id == gene_a.id,
+                        Interaction.target_gene_id == gene_b.id,
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    continue
+
+                frequency = (co_count / total_cases) if total_cases else 0.0
+                self.db.add(Interaction(
+                    interaction_type="CoMutation",
+                    source_gene_id=gene_a.id,
+                    target_gene_id=gene_b.id,
+                    confidence_score=frequency,
+                    evidence_score=float(co_count),
+                    source_database="GDC",
+                    evidence_type="somatic_co_mutation",
+                    is_directed=False,
+                    extra_metadata={
+                        "project": project,
+                        "co_occurrence_count": co_count,
+                        "total_cases_with_mutations": total_cases,
+                    },
+                ))
+                inserted_edges += 1
 
             await self.db.commit()
-            await self._finish_job(job, len(hits), inserted)
+            await self._finish_job(job, len(hits), inserted_genes + inserted_edges)
             await self.update_datasource_status("gdc", "success", records=len(hits))
+            logger.info(
+                f"[GDC] {project}: {inserted_genes} new genes, "
+                f"{inserted_edges} new CoMutation edges "
+                f"(from {total_cases} cases, {len(pair_counts)} candidate pairs, "
+                f"min_co_occurrences={min_co_occurrences})"
+            )
         except Exception as exc:
             await self._fail_job(job, exc)
             await self.update_datasource_status("gdc", "failed", errors=1)
+            raise
+
+    # ── cBioPortal (Edge type 4 fallback for diseases with no GDC project) ──
+    async def ingest_cbioportal(self, job_id: int, study_id: str, gene_symbols: List[str] = None,
+                                 min_co_occurrences: int = 2):
+        """
+        Derive Edge type 4 — Co-mutation edges from a public cBioPortal
+        study, for diseases with no dedicated public GDC/TARGET project
+        (e.g. Ewing Sarcoma, Medulloblastoma). Same co-occurrence logic as
+        ingest_gdc: group mutations by patient, count gene pairs mutated
+        together in the same patient, keep pairs meeting min_co_occurrences.
+
+        study_id must be resolved first via CBioPortalClient.search_studies()
+        — do not guess this string, cBioPortal study IDs are per-publication
+        and multiple cohorts may exist for the same disease.
+        """
+        job = await self._load_job(job_id)
+        if not job:
+            return
+        await self._start_job(job)
+        try:
+            async with CBioPortalClient() as client:
+                mutations = await client.get_mutations(study_id)
+
+            gene_symbols_set = set(gene_symbols) if gene_symbols else None
+            genes_seen = set()
+            patient_genes: Dict[str, set] = defaultdict(set)
+            inserted_genes = 0
+
+            for mut in mutations:
+                if not isinstance(mut, dict):
+                    continue
+                gene_symbol = (mut.get("gene") or {}).get("hugoGeneSymbol")
+                patient_id = mut.get("patientId") or mut.get("sampleId")
+                if not gene_symbol or not patient_id:
+                    continue
+                if gene_symbols_set and gene_symbol not in gene_symbols_set:
+                    continue
+
+                if gene_symbol not in genes_seen:
+                    genes_seen.add(gene_symbol)
+                    res = await self.db.execute(select(Gene).where(Gene.symbol == gene_symbol))
+                    gene = res.scalar_one_or_none()
+                    if not gene:
+                        gene = Gene(symbol=gene_symbol, is_oncogene=True)
+                        self.db.add(gene)
+                        await self.db.flush()
+                        inserted_genes += 1
+
+                patient_genes[patient_id].add(gene_symbol)
+
+            pair_counts: Counter = Counter()
+            for genes_in_patient in patient_genes.values():
+                if len(genes_in_patient) < 2:
+                    continue
+                for sym_a, sym_b in combinations(sorted(genes_in_patient), 2):
+                    pair_counts[(sym_a, sym_b)] += 1
+
+            total_patients = len(patient_genes)
+            inserted_edges = 0
+            for (sym_a, sym_b), co_count in pair_counts.items():
+                if co_count < min_co_occurrences:
+                    continue
+
+                res_a = await self.db.execute(select(Gene).where(Gene.symbol == sym_a))
+                gene_a = res_a.scalar_one_or_none()
+                res_b = await self.db.execute(select(Gene).where(Gene.symbol == sym_b))
+                gene_b = res_b.scalar_one_or_none()
+                if not gene_a or not gene_b:
+                    continue
+
+                existing = await self.db.execute(
+                    select(Interaction).where(
+                        Interaction.interaction_type == "CoMutation",
+                        Interaction.source_gene_id == gene_a.id,
+                        Interaction.target_gene_id == gene_b.id,
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    continue
+
+                frequency = (co_count / total_patients) if total_patients else 0.0
+                self.db.add(Interaction(
+                    interaction_type="CoMutation",
+                    source_gene_id=gene_a.id,
+                    target_gene_id=gene_b.id,
+                    confidence_score=frequency,
+                    evidence_score=float(co_count),
+                    source_database="cBioPortal",
+                    evidence_type="somatic_co_mutation",
+                    is_directed=False,
+                    extra_metadata={
+                        "study_id": study_id,
+                        "co_occurrence_count": co_count,
+                        "total_patients": total_patients,
+                    },
+                ))
+                inserted_edges += 1
+
+            await self.db.commit()
+            await self._finish_job(job, len(mutations), inserted_genes + inserted_edges)
+            await self.update_datasource_status("cbioportal", "success", records=len(mutations))
+            logger.info(
+                f"[cBioPortal] {study_id}: {inserted_genes} new genes, "
+                f"{inserted_edges} new CoMutation edges "
+                f"(from {total_patients} patients, {len(pair_counts)} candidate pairs, "
+                f"min_co_occurrences={min_co_occurrences})"
+            )
+        except Exception as exc:
+            await self._fail_job(job, exc)
+            await self.update_datasource_status("cbioportal", "failed", errors=1)
             raise

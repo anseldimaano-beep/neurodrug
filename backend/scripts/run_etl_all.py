@@ -34,9 +34,17 @@ from app.models.domain import Disease
 from app.services.etl.orchestrator import ETLOrchestrator
 from app.core.logging import logger
 
-_CANCER_GENES = [
-    "EGFR", "TP53", "PTEN", "IDH1", "IDH2", "BRAF", "KRAS", "PIK3CA",
-    "RB1", "CDKN2A", "MYC", "MYCN", "ALK", "PDGFRA", "NF1", "VHL",
+_DISEASE_DRIVER_GENES = {
+    "glioblastoma":    ["EGFR", "PTEN", "IDH1", "NF1", "RB1", "PDGFRA"],
+    "neuroblastoma":   ["MYCN", "ALK", "PHOX2B", "ATRX"],
+    "medulloblastoma": ["PTCH1", "SMO", "CTNNB1", "MYC"],
+    "ewing sarcoma":   ["EWSR1", "FLI1", "ERG"],
+    "wilms tumor":     ["WT1", "CTNNB1"],
+}
+# Genes from the old shared list not confirmed against the project's spec —
+# not auto-assigned to any disease. See etl.py for details.
+_UNVERIFIED_PAN_CANCER_GENES = [
+    "TP53", "IDH2", "BRAF", "KRAS", "PIK3CA", "CDKN2A", "VHL",
 ]
 _CANCER_CHEMBL_IDS = [
     "CHEMBL1201583", "CHEMBL941", "CHEMBL535",
@@ -55,13 +63,17 @@ async def main(run_chembl: bool):
             return
 
         print(f"Found {len(diseases)} diseases. Running OpenTargets + "
-              f"ClinicalTrials for each...\n")
+              f"ClinicalTrials + STRING + DGIdb (per-disease gene panels) "
+              f"for each...\n")
 
         for disease in diseases:
             efo_id = disease.efo_id
             condition = disease.name.lower()
+            gene_panel = _DISEASE_DRIVER_GENES.get(condition, [])
 
             print(f"--- {disease.name} ({efo_id}) ---")
+            print(f"  Driver gene panel: {gene_panel or 'NONE — not in _DISEASE_DRIVER_GENES'}")
+
             ot_job = await orch.create_job("opentargets")
             try:
                 await orch.ingest_opentargets(ot_job.id, efo_id)
@@ -76,21 +88,23 @@ async def main(run_chembl: bool):
             except Exception as e:
                 print(f"  ClinicalTrials FAILED: {e}")
 
-        print(f"\n--- STRING (Gene-Gene PPI) over {len(_CANCER_GENES)} genes ---")
-        string_job = await orch.create_job("string")
-        try:
-            await orch.ingest_string(string_job.id, _CANCER_GENES, 700)
-            print(f"  STRING OK (job {string_job.id})")
-        except Exception as e:
-            print(f"  STRING FAILED: {e}")
+            if not gene_panel:
+                print(f"  Skipping STRING/DGIdb — no confirmed gene panel for this disease.")
+                continue
 
-        print(f"\n--- DGIdb (Drug-Gene) over {len(_CANCER_GENES)} genes ---")
-        dgidb_job = await orch.create_job("dgidb")
-        try:
-            await orch.ingest_dgidb(dgidb_job.id, _CANCER_GENES)
-            print(f"  DGIdb OK (job {dgidb_job.id})")
-        except Exception as e:
-            print(f"  DGIdb FAILED: {e}")
+            string_job = await orch.create_job("string")
+            try:
+                await orch.ingest_string(string_job.id, gene_panel, 700)
+                print(f"  STRING OK (job {string_job.id}, {len(gene_panel)} genes)")
+            except Exception as e:
+                print(f"  STRING FAILED: {e}")
+
+            dgidb_job = await orch.create_job("dgidb")
+            try:
+                await orch.ingest_dgidb(dgidb_job.id, gene_panel)
+                print(f"  DGIdb OK (job {dgidb_job.id}, {len(gene_panel)} genes)")
+            except Exception as e:
+                print(f"  DGIdb FAILED: {e}")
 
         if run_chembl:
             print(f"\n--- ChEMBL over {len(_CANCER_CHEMBL_IDS)} drug IDs ---")
@@ -101,9 +115,12 @@ async def main(run_chembl: bool):
             except Exception as e:
                 print(f"  ChEMBL FAILED: {e}")
 
-        print("\nDone. Check checkpoints/baseline_comparison.json / the "
-              "Knowledge Graph Explorer to see node/edge counts, or query "
-              "genes/drugs/interactions tables directly.")
+        print("\nDone. Note: _UNVERIFIED_PAN_CANCER_GENES "
+              f"({_UNVERIFIED_PAN_CANCER_GENES}) were NOT run — add them to "
+              "a disease's panel once confirmed against your spec, or run "
+              "manually via orch.ingest_string()/ingest_dgidb().")
+        print("Check node/edge counts via the Knowledge Graph Explorer, or "
+              "query genes/drugs/interactions tables directly.")
 
 
 if __name__ == "__main__":

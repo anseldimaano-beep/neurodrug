@@ -125,10 +125,11 @@ def run_etl_clinicaltrials(self, job_id: int, condition: str, intervention: str 
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60, name="etl.gdc")
-def run_etl_gdc(self, job_id: int, project: str, gene_ids: List[str] = None):
+def run_etl_gdc(self, job_id: int, project: str, gene_ids: List[str] = None,
+                 min_co_occurrences: int = 2):
     logger.info(f"[ETL] gdc job={job_id}")
     try:
-        _run_task("gdc", "ingest_gdc", job_id, project, gene_ids)
+        _run_task("gdc", "ingest_gdc", job_id, project, gene_ids, min_co_occurrences)
         ETL_JOBS.labels("gdc", "success").inc()
     except Exception as exc:
         ETL_JOBS.labels("gdc", "failed").inc()

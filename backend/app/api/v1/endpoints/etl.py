@@ -15,10 +15,36 @@ from app.core.logging import logger
 
 router = APIRouter()
 
-_CANCER_GENES = [
-    "EGFR","TP53","PTEN","IDH1","IDH2","BRAF","KRAS","PIK3CA",
-    "RB1","CDKN2A","MYC","MYCN","ALK","PDGFRA","NF1","VHL",
+# FIX C9: per-disease driver gene panels, per the project's data-collection
+# spec (COSMIC Cancer Gene Census, 40 genes across 5 disease types). This
+# replaces a single flat 16-gene list that was applied identically to every
+# disease regardless of relevance — under that scheme, Ewing Sarcoma and
+# Wilms Tumor had ZERO of their defining driver genes (EWSR1/FLI1/ERG and
+# WT1 were entirely absent), so those two diseases got no STRING/DGIdb
+# signal at all, only whatever OpenTargets happened to surface per-disease.
+#
+# NOTE: only genes explicitly confirmed against the project spec are listed
+# below. The spec calls for 40 genes total (COSMIC Cancer Gene Census) but
+# only named ~18 unique genes across the 5 diseases in the excerpt used to
+# build this list — the remaining genes needed to reach 40 have NOT been
+# added, to avoid fabricating gene-disease associations. Add them here once
+# the full 40-gene list is confirmed.
+_DISEASE_DRIVER_GENES = {
+    "glioblastoma":    ["EGFR", "PTEN", "IDH1", "NF1", "RB1", "PDGFRA"],
+    "neuroblastoma":   ["MYCN", "ALK", "PHOX2B", "ATRX"],
+    "medulloblastoma": ["PTCH1", "SMO", "CTNNB1", "MYC"],
+    "ewing sarcoma":   ["EWSR1", "FLI1", "ERG"],
+    "wilms tumor":     ["WT1", "CTNNB1"],
+}
+
+# Genes from the old flat list NOT confirmed against the spec excerpt above.
+# Kept available but NOT auto-assigned to any disease — these may belong to
+# the remaining ~22 genes needed to reach the spec's 40-gene total, but
+# without the full COSMIC list we can't say which disease(s) they belong to.
+_UNVERIFIED_PAN_CANCER_GENES = [
+    "TP53", "IDH2", "BRAF", "KRAS", "PIK3CA", "CDKN2A", "VHL",
 ]
+
 # NOTE: CHEMBL614 (Pyrazinamide — a tuberculosis drug, unrelated to any of
 # the five cancers this project covers) used to be in this list. It was an
 # accidental collision with Temozolomide's *incorrect* seeded chembl_id,
@@ -38,20 +64,23 @@ async def ingest_all_diseases(
     current_user: User = Depends(require_role("researcher")),
 ):
     """
-    Queue OpenTargets + ClinicalTrials ETL for every disease currently in the DB,
-    plus one STRING and one DGIdb job over the shared cancer-gene panel.
+    Queue OpenTargets + ClinicalTrials + STRING + DGIdb ETL for every
+    disease currently in the DB, using that disease's own driver gene
+    panel (see _DISEASE_DRIVER_GENES) for the gene-centric sources.
 
     FIX C8: this previously only queued OpenTargets + ClinicalTrials, so Gene
     nodes never populated — STRING (Gene-Gene) and DGIdb (Drug-Gene) were
-    never triggered by this endpoint at all, even though the docstring billed
-    it as the one-shot fix for "1 node, 0 edges". All three sources are
-    needed before Genes(N) shows anything but 0 in the graph explorer.
+    never triggered by this endpoint at all.
+    FIX C9: STRING/DGIdb previously ran ONCE over a single shared gene list
+    applied to every disease. Now each disease gets its own confirmed driver
+    panel, so e.g. Ewing Sarcoma's STRING/DGIdb jobs actually run over
+    EWSR1/FLI1/ERG instead of a generic list that didn't include them.
 
       - OpenTargets: passes the MONDO ID stored on each Disease row directly
         as efoId — Open Targets' GraphQL API accepts MONDO-format IDs natively.
       - ClinicalTrials: uses the disease name as the condition search term.
-      - STRING / DGIdb: run once each over the shared cancer-gene panel, since
-        these sources are gene-centric rather than disease-specific.
+      - STRING / DGIdb: run once per disease, over that disease's own
+        confirmed driver gene panel.
     """
     from sqlalchemy import select as _select
     from app.models.domain import Disease as _Disease
@@ -64,6 +93,13 @@ async def ingest_all_diseases(
     for disease in diseases:
         efo_id = disease.efo_id
         condition = disease.name.lower()
+        gene_panel = _DISEASE_DRIVER_GENES.get(condition, [])
+        if not gene_panel:
+            logger.warning(
+                f"[ETL] no confirmed driver gene panel for '{disease.name}' — "
+                f"STRING/DGIdb will be skipped for this disease. Add it to "
+                f"_DISEASE_DRIVER_GENES."
+            )
 
         ot_job = await orch.create_job("opentargets")
         run_etl_opentargets.delay(ot_job.id, efo_id)
@@ -71,27 +107,29 @@ async def ingest_all_diseases(
         ct_job = await orch.create_job("clinicaltrials")
         run_etl_clinicaltrials.delay(ct_job.id, condition)
 
-        queued.append({
+        job_ids = {
             "disease": disease.name,
             "efo_id": efo_id,
             "opentargets_job_id": ot_job.id,
             "clinicaltrials_job_id": ct_job.id,
-        })
-        logger.info(f"[ETL] queued OT job={ot_job.id} + CT job={ct_job.id} for {disease.name}")
+            "gene_panel": gene_panel,
+        }
 
-    string_job = await orch.create_job("string")
-    run_etl_string.delay(string_job.id, _CANCER_GENES, 700)
-    dgidb_job = await orch.create_job("dgidb")
-    run_etl_dgidb.delay(dgidb_job.id, _CANCER_GENES)
-    logger.info(f"[ETL] queued STRING job={string_job.id} + DGIdb job={dgidb_job.id} "
-                f"over {len(_CANCER_GENES)} genes")
+        if gene_panel:
+            string_job = await orch.create_job("string")
+            run_etl_string.delay(string_job.id, gene_panel, 700)
+            dgidb_job = await orch.create_job("dgidb")
+            run_etl_dgidb.delay(dgidb_job.id, gene_panel)
+            job_ids["string_job_id"] = string_job.id
+            job_ids["dgidb_job_id"] = dgidb_job.id
 
-    return {
-        "queued": queued,
-        "total": len(queued),
-        "string_job_id": string_job.id,
-        "dgidb_job_id": dgidb_job.id,
-    }
+        queued.append(job_ids)
+        logger.info(
+            f"[ETL] queued OT job={ot_job.id} + CT job={ct_job.id} for "
+            f"{disease.name} (gene panel: {gene_panel or 'NONE — unconfirmed'})"
+        )
+
+    return {"queued": queued, "total": len(queued)}
 
 
 @router.post("/ingest/opentargets", status_code=status.HTTP_202_ACCEPTED)
@@ -182,13 +220,20 @@ async def ingest_clinicaltrials(
 async def ingest_gdc(
     project: str = "TCGA-GBM",
     gene_ids: List[str] = None,
+    min_co_occurrences: int = 2,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("researcher")),
 ):
-    """Trigger GDC/TCGA somatic mutation ETL for a TCGA project."""
+    """
+    Trigger GDC/TCGA somatic mutation ETL for a TCGA project. Also derives
+    Edge type 4 — Co-mutation edges from genes mutated together in the same
+    patient case; min_co_occurrences sets how many distinct cases a gene
+    pair must co-occur in before an edge is created (default 2, to filter
+    out single-patient coincidences).
+    """
     orch = ETLOrchestrator(db)
     job = await orch.create_job("gdc")
-    run_etl_gdc.delay(job.id, project, gene_ids)
+    run_etl_gdc.delay(job.id, project, gene_ids, min_co_occurrences)
     return {"job_id": job.id, "status": "queued", "source": "gdc", "project": project}
 
 
