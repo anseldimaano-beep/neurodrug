@@ -56,22 +56,15 @@ class CBioPortalClient:
     async def get_mutations(self, study_id: str, molecular_profile_suffix: str = "_mutations",
                              sample_list_suffix: str = "_all", page_size: int = 10000) -> list:
         """
-        Fetch all mutation records for a study. Most cBioPortal studies
-        follow the {study_id}_mutations / {study_id}_all naming convention
-        for their default molecular profile and sample list — verify these
-        exist for a given study via /api/studies/{study_id}/molecular-profiles
-        if this returns a 404, since a small number of studies deviate.
+        Fetch all mutation records for a study via the POST /fetch endpoint
+        (cBioPortal has moved several query endpoints to POST+JSON body;
+        the plain GET+querystring form returns 400 on the current API).
         """
         molecular_profile_id = f"{study_id}{molecular_profile_suffix}"
         sample_list_id = f"{study_id}{sample_list_suffix}"
-        url = f"{self.base_url}/molecular-profiles/{molecular_profile_id}/mutations"
-        params = {
-            "sampleListId": sample_list_id,
-            "projection": "DETAILED",
-            "pageNumber": 0,
-            "pageSize": page_size,
-            "direction": "ASC",
-        }
-        response = await self.client.get(url, params=params)
+        url = f"{self.base_url}/molecular-profiles/{molecular_profile_id}/mutations/fetch"
+        params = {"projection": "DETAILED"}
+        body = {"sampleListId": sample_list_id}
+        response = await self.client.post(url, params=params, json=body)
         response.raise_for_status()
         return response.json()
