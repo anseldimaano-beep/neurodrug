@@ -1,0 +1,114 @@
+"""
+Run the full ETL pipeline (OpenTargets + ClinicalTrials per disease, plus
+one shared STRING + DGIdb pass over the cancer gene panel) synchronously,
+in-process — no Celery worker, no Redis, no auth token required.
+
+This mirrors exactly what POST /api/v1/etl/ingest/all_diseases queues via
+Celery .delay(), just run directly and sequentially so you can watch it in
+one terminal and point it at any DB via the usual env var overrides.
+
+Usage (against local Docker Postgres):
+    docker-compose exec api python scripts/run_etl_all.py
+
+Usage (against Neon, from your local machine):
+    docker-compose exec \
+      -e POSTGRES_HOST=<neon-host> -e POSTGRES_PORT=5432 \
+      -e POSTGRES_DB=neondb -e POSTGRES_USER=neondb_owner \
+      -e POSTGRES_PASSWORD=<password> -e POSTGRES_SSL=true \
+      api python scripts/run_etl_all.py
+
+Add --chembl to also run the ChEMBL drug-ingestion pass (off by default
+since seed_initial_data.py may already have your drug catalog with correct
+chembl_ids — re-running ChEMBL ingestion will upsert by chembl_id and could
+overwrite fields on existing rows).
+"""
+import argparse
+import asyncio
+import sys
+
+sys.path.insert(0, ".")
+
+from sqlalchemy import select
+from app.db.session import AsyncSessionLocal
+from app.models.domain import Disease
+from app.services.etl.orchestrator import ETLOrchestrator
+from app.core.logging import logger
+
+_CANCER_GENES = [
+    "EGFR", "TP53", "PTEN", "IDH1", "IDH2", "BRAF", "KRAS", "PIK3CA",
+    "RB1", "CDKN2A", "MYC", "MYCN", "ALK", "PDGFRA", "NF1", "VHL",
+]
+_CANCER_CHEMBL_IDS = [
+    "CHEMBL1201583", "CHEMBL941", "CHEMBL535",
+    "CHEMBL25", "CHEMBL1421", "CHEMBL2068237",
+]
+
+
+async def main(run_chembl: bool):
+    async with AsyncSessionLocal() as db:
+        orch = ETLOrchestrator(db)
+
+        result = await db.execute(select(Disease).where(Disease.is_deleted == False))
+        diseases = result.scalars().all()
+        if not diseases:
+            print("No diseases found — run seed_initial_data.py first.")
+            return
+
+        print(f"Found {len(diseases)} diseases. Running OpenTargets + "
+              f"ClinicalTrials for each...\n")
+
+        for disease in diseases:
+            efo_id = disease.efo_id
+            condition = disease.name.lower()
+
+            print(f"--- {disease.name} ({efo_id}) ---")
+            ot_job = await orch.create_job("opentargets")
+            try:
+                await orch.ingest_opentargets(ot_job.id, efo_id)
+                print(f"  OpenTargets OK (job {ot_job.id})")
+            except Exception as e:
+                print(f"  OpenTargets FAILED: {e}")
+
+            ct_job = await orch.create_job("clinicaltrials")
+            try:
+                await orch.ingest_clinicaltrials(ct_job.id, condition)
+                print(f"  ClinicalTrials OK (job {ct_job.id})")
+            except Exception as e:
+                print(f"  ClinicalTrials FAILED: {e}")
+
+        print(f"\n--- STRING (Gene-Gene PPI) over {len(_CANCER_GENES)} genes ---")
+        string_job = await orch.create_job("string")
+        try:
+            await orch.ingest_string(string_job.id, _CANCER_GENES, 700)
+            print(f"  STRING OK (job {string_job.id})")
+        except Exception as e:
+            print(f"  STRING FAILED: {e}")
+
+        print(f"\n--- DGIdb (Drug-Gene) over {len(_CANCER_GENES)} genes ---")
+        dgidb_job = await orch.create_job("dgidb")
+        try:
+            await orch.ingest_dgidb(dgidb_job.id, _CANCER_GENES)
+            print(f"  DGIdb OK (job {dgidb_job.id})")
+        except Exception as e:
+            print(f"  DGIdb FAILED: {e}")
+
+        if run_chembl:
+            print(f"\n--- ChEMBL over {len(_CANCER_CHEMBL_IDS)} drug IDs ---")
+            chembl_job = await orch.create_job("chembl")
+            try:
+                await orch.ingest_chembl(chembl_job.id, _CANCER_CHEMBL_IDS)
+                print(f"  ChEMBL OK (job {chembl_job.id})")
+            except Exception as e:
+                print(f"  ChEMBL FAILED: {e}")
+
+        print("\nDone. Check checkpoints/baseline_comparison.json / the "
+              "Knowledge Graph Explorer to see node/edge counts, or query "
+              "genes/drugs/interactions tables directly.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--chembl", action="store_true",
+                         help="Also run ChEMBL drug ingestion (off by default)")
+    args = parser.parse_args()
+    asyncio.run(main(args.chembl))
