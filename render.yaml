@@ -1,5 +1,18 @@
 services:
-  # ── API (inference only — no celery/worker/mlflow/prometheus/grafana) ──
+  # ── Redis / Celery broker (Render Key Value, free tier) ─────────────────
+  # FIX C11: previously REDIS_URL was hardcoded to redis://localhost:6379/0,
+  # which only works in local Docker Compose (Redis as a sibling container).
+  # On Render there was no Redis at all, so any endpoint calling .delay()
+  # (e.g. POST /api/v1/etl/ingest/all_diseases) raised an uncaught
+  # ConnectionError -> 500, since Celery couldn't reach a broker to enqueue
+  # the task. This adds a real, Render-managed Redis-compatible instance.
+  - type: keyvalue
+    name: neurodrug-redis
+    plan: free
+    ipAllowList: [] # internal (private network) connections only -- API/worker only need this over the private network, never from the public internet
+
+  # ── API (web request/response only -- ETL/training work is queued to the
+  #    worker below via Celery, not run inline in this service) ──────────
   - type: web
     name: neurodrug-api
     env: docker
@@ -29,7 +42,75 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: REDIS_URL
-        value: redis://localhost:6379/0
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+      - key: SENTRY_DSN
+        value: ""
+
+  # ── Celery worker (processes ETL/training jobs queued by the API) ──────
+  # Same image as the API, same DB/Redis config, but runs the Celery worker
+  # process instead of the FastAPI server. Without this, tasks queued via
+  # .delay() would sit in Redis forever with nothing consuming them.
+  - type: worker
+    name: neurodrug-worker
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A celery_app worker --loglevel=info --concurrency=2
+    plan: free
+    envVars:
+      - key: POSTGRES_HOST
+        sync: false
+      - key: POSTGRES_PORT
+        sync: false
+      - key: POSTGRES_USER
+        sync: false
+      - key: POSTGRES_PASSWORD
+        sync: false
+      - key: POSTGRES_DB
+        sync: false
+      - key: POSTGRES_SSL
+        value: "true"
+      - key: SECRET_KEY
+        fromService:
+          type: web
+          name: neurodrug-api
+          envVarKey: SECRET_KEY
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: ENVIRONMENT
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: keyvalue
+          name: neurodrug-redis
+          property: connectionString
       - key: MLFLOW_TRACKING_URI
         value: ""
       - key: SENTRY_DSN
