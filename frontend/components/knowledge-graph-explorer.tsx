@@ -15,9 +15,9 @@ const EDGE_COLOR: Record<string, string> = {
   DrugDisease:   "#ff6b81",
 };
 const EDGE_WIDTH: Record<string, number> = {
-  DrugTarget: 1.5, GeneDisease: 1.5, ClinicalTrial: 1.25, DrugDisease: 1.25, GeneGene: 0.75,
+  DrugTarget: 2.5, GeneDisease: 2.5, ClinicalTrial: 2, DrugDisease: 2, GeneGene: 1.25,
 };
-const EDGE_OPACITY_DEFAULT = 0.28;
+const EDGE_OPACITY_DEFAULT = 0.6;
 const GENE_RADIUS = 210;
 const DRUG_RADIUS = 430;
 
