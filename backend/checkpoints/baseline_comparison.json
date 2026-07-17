@@ -1,0 +1,85 @@
+[
+  {
+    "model": "HGT (proposed)",
+    "type": "graph",
+    "roc_auc": 0.9021458219124442,
+    "average_precision": 0.8517126290990571,
+    "hits@10": 0.07964601769911504,
+    "hits@20": 0.1504424778761062,
+    "mrr": 0.04320026263859299,
+    "ndcg@10": 0.9363792118010483,
+    "p_value_vs_hgt": null
+  },
+  {
+    "model": "Random",
+    "type": "traditional",
+    "roc_auc": 0.5612812279739995,
+    "average_precision": 0.5866039087870283,
+    "hits@10": 0.05309734513274336,
+    "hits@20": 0.10619469026548672,
+    "mrr": 0.03686697397869119,
+    "ndcg@10": 0.727329844310522,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Jaccard similarity",
+    "type": "traditional",
+    "roc_auc": 0.20181690030542723,
+    "average_precision": 0.504424778761062,
+    "hits@10": 0.008849557522123894,
+    "hits@20": 0.008849557522123894,
+    "mrr": 0.014924736649148916,
+    "ndcg@10": 0.2200917662980802,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Matrix Factorization",
+    "type": "traditional",
+    "roc_auc": 0.5850105724802256,
+    "average_precision": 0.5844865605302312,
+    "hits@10": 0.07964601769911504,
+    "hits@20": 0.1592920353982301,
+    "mrr": 0.036358750426213275,
+    "ndcg@10": 0.9216017310213247,
+    "p_value_vs_hgt": 0.0,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "Homogeneous GCN",
+    "type": "graph",
+    "roc_auc": 0.8438013940010964,
+    "average_precision": 0.7817439566728942,
+    "hits@10": 0.08849557522123894,
+    "hits@20": 0.1415929203539823,
+    "mrr": 0.04141635867352998,
+    "ndcg@10": 1.0,
+    "p_value_vs_hgt": 0.04,
+    "significant_at_0.05": true
+  },
+  {
+    "model": "R-GCN",
+    "type": "graph",
+    "roc_auc": 0.9084893100477719,
+    "average_precision": 0.850812161457031,
+    "hits@10": 0.07079646017699115,
+    "hits@20": 0.1504424778761062,
+    "mrr": 0.039874868012422654,
+    "ndcg@10": 0.7948833326720566,
+    "p_value_vs_hgt": 0.596,
+    "significant_at_0.05": false
+  },
+  {
+    "model": "HAN",
+    "type": "graph",
+    "roc_auc": 0.9049259926384212,
+    "average_precision": 0.8393884600532054,
+    "hits@10": 0.07079646017699115,
+    "hits@20": 0.1504424778761062,
+    "mrr": 0.04259082532466703,
+    "ndcg@10": 0.8643145546088339,
+    "p_value_vs_hgt": 0.544,
+    "significant_at_0.05": false
+  }
+]
