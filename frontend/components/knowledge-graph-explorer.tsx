@@ -23,6 +23,55 @@ const DRUG_RADIUS = 430;
 
 const BG = "#080d17";
 
+/* ── Circular / community-module layout ──────────────────────────────
+   Groups nodes into modules using label propagation (a lightweight,
+   dependency-free community-detection algorithm: each node adopts the
+   label most common among its neighbors, repeated until stable). Used
+   to reproduce the "ring of nodes + module bubbles + intra/inter-module
+   edge coloring" style. Not as precise as Louvain modularity, but needs
+   no extra packages and is fast enough to re-run on every layout switch. */
+const COMMUNITY_PALETTE = [
+  "#f4c542", "#f0a63e", "#e8935a", "#e2b04a", "#f2d16b",
+  "#d99a4e", "#f5be3f", "#e6a94a", "#f0c85a", "#dba43c",
+];
+
+function detectCommunities(nodeIds: string[], edges: { from: any; to: any }[]): Map<any, number> {
+  const adj = new Map<any, any[]>();
+  nodeIds.forEach((id) => adj.set(id, []));
+  edges.forEach((e) => {
+    if (adj.has(e.from) && adj.has(e.to)) {
+      adj.get(e.from)!.push(e.to);
+      adj.get(e.to)!.push(e.from);
+    }
+  });
+  const labels = new Map<any, number>();
+  nodeIds.forEach((id, i) => labels.set(id, i));
+  let order = [...nodeIds];
+  for (let iter = 0; iter < 20; iter++) {
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    let changed = false;
+    order.forEach((id) => {
+      const neighbors = adj.get(id) || [];
+      if (!neighbors.length) return;
+      const counts = new Map<number, number>();
+      neighbors.forEach((nb) => {
+        const l = labels.get(nb);
+        if (l !== undefined) counts.set(l, (counts.get(l) || 0) + 1);
+      });
+      let best = labels.get(id)!, bestCount = -1;
+      counts.forEach((c, l) => {
+        if (c > bestCount || (c === bestCount && l < best)) { bestCount = c; best = l; }
+      });
+      if (best !== labels.get(id)) { labels.set(id, best); changed = true; }
+    });
+    if (!changed) break;
+  }
+  return labels;
+}
+
 export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: Props) {
   const [allNodes, setAllNodes]         = useState<any[]>([]);
   const [allEdges, setAllEdges]         = useState<any[]>([]);
@@ -36,6 +85,9 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
   const [nodeLimit, setNodeLimit]       = useState(40);
   const [activeEdgeTypes, setActiveEdgeTypes] = useState<Set<string>>(new Set(Object.keys(EDGE_COLOR)));
   const [isolateMode, setIsolateMode]   = useState(false);
+  const [layoutMode, setLayoutMode]     = useState<"radial" | "circular">("radial");
+  const communityLabelsRef = useRef<Map<any, number>>(new Map());
+  const communityCountRef  = useRef(0);
   const networkRef   = useRef<any>(null);
   const diseaseIdRef = useRef<any>(null);
   const rawNodes     = useRef<any[]>([]);
@@ -240,11 +292,98 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
     if (disease) { disease.x = 0; disease.y = 0; }
   }, []);
 
+  /* ── Circular layout: single ring grouped by detected community, with
+     module "bubbles" arced above the ring (like a WGCNA-style module plot).
+     Disease stays centered. Returns extra bubble nodes + hub-connector
+     edges to splice into the graph, and stores the community-label map
+     (via communityLabelsRef) so edges can be colored green (same module)
+     vs red (crosses modules). ────────────────────────────────────────── */
+  const applyCircularLayout = useCallback((disease: any, visibleNodes: any[], edges: any[]) => {
+    const ids = visibleNodes.map((n) => n.id);
+    const labels = detectCommunities(ids, edges);
+    communityLabelsRef.current = labels;
+
+    const groups = new Map<number, any[]>();
+    visibleNodes.forEach((n) => {
+      const l = labels.get(n.id) ?? -1;
+      if (!groups.has(l)) groups.set(l, []);
+      groups.get(l)!.push(n);
+    });
+    // Largest modules first; cap displayed bubbles at 10 (smaller/singleton
+    // modules still get ring positions + coloring, just no bubble drawn).
+    const sortedGroups = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+    const commIndex = new Map<number, number>();
+    sortedGroups.forEach(([l], i) => commIndex.set(l, i));
+    communityCountRef.current = sortedGroups.length;
+
+    const orderedNodes: any[] = [];
+    sortedGroups.forEach(([, members]) => {
+      members.sort((a, b) => b.degree - a.degree);
+      orderedNodes.push(...members);
+    });
+
+    const n = orderedNodes.length;
+    const RING_R = Math.max(260, (n * 40) / (2 * Math.PI));
+    orderedNodes.forEach((node, i) => {
+      const angle = (2 * Math.PI * i) / Math.max(n, 1) - Math.PI / 2;
+      node.x = Math.cos(angle) * RING_R;
+      node.y = Math.sin(angle) * RING_R;
+      node.physics = false;
+    });
+
+    if (disease) { disease.x = 0; disease.y = 0; disease.physics = false; }
+
+    // Module bubbles arced above the ring, sized by member count
+    const maxBubbles = Math.min(sortedGroups.length, 10);
+    const bubbles: any[] = [];
+    const connectors: any[] = [];
+    const arcSpan = Math.PI * 0.85;
+    for (let i = 0; i < maxBubbles; i++) {
+      const [, members] = sortedGroups[i];
+      if (members.length < 2) continue; // skip singleton "modules" -- not worth a bubble
+      const t = maxBubbles === 1 ? 0.5 : i / (maxBubbles - 1);
+      const angle = -Math.PI / 2 - arcSpan / 2 + t * arcSpan;
+      const br = RING_R + 200 + (i % 3) * 40; // slight radius stagger avoids bubble overlap
+      const bubbleId = `__module_${i}`;
+      bubbles.push({
+        id: bubbleId,
+        label: `C${i + 1}`,
+        shape: "dot",
+        size: Math.min(16 + Math.sqrt(members.length) * 4, 46),
+        color: {
+          background: COMMUNITY_PALETTE[i % COMMUNITY_PALETTE.length],
+          border: "#8a6a1a",
+          highlight: { background: "#ffe28a", border: "#8a6a1a" },
+        },
+        font: { color: "#2a1e00", size: 12, bold: true },
+        borderWidth: 1.5,
+        x: Math.cos(angle) * br, y: Math.sin(angle) * br - RING_R * 0.15,
+        physics: false,
+        fixed: true,
+        _isModuleBubble: true,
+        title: `Module C${i + 1} — ${members.length} nodes`,
+      });
+      // thin connector from bubble down to its hub (highest-degree) member
+      const hub = members[0];
+      connectors.push({
+        from: bubbleId, to: hub.id,
+        color: { color: "#8a6a1a", opacity: 0.55 },
+        width: 1, dashes: [2, 3],
+        arrows: { to: { enabled: true, scaleFactor: 0.4 } },
+        smooth: { type: "curvedCW", roundness: 0.15 },
+        _isModuleConnector: true,
+      });
+    }
+
+    return { bubbles, connectors, commIndex, labels };
+  }, []);
+
   /* ── Build visible graph from current settings ─────────────────────── */
   const buildGraph = useCallback((
     nodes: any[], edges: any[],
     limit: number, f: string, s: string,
     edgeTypes: Set<string>, isolated: boolean, selId: any,
+    mode: "radial" | "circular" = layoutMode,
   ) => {
     // Sort by degree desc, always keep disease
     const disease = nodes.find((n) => n.nodeType === "Disease");
@@ -273,14 +412,38 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
       (e) => visibleIds.has(e.from) && visibleIds.has(e.to) && edgeTypes.has(e._edgeType)
     );
 
-    // Compute radial positions BEFORE building finalNodes below, so that
-    // copies made for dimmed (search-mismatched) nodes pick up fresh x/y.
-    if (!isolated) {
+    // Compute positions BEFORE building finalNodes below, so that copies
+    // made for dimmed (search-mismatched) nodes pick up fresh x/y.
+    let moduleBubbles: any[] = [];
+    let moduleConnectors: any[] = [];
+    let coloredEdges = filteredEdges;
+
+    if (!isolated && mode === "circular") {
+      const { bubbles, connectors, labels } = applyCircularLayout(disease, visible, filteredEdges);
+      moduleBubbles = bubbles;
+      moduleConnectors = connectors;
+      // Recolor real edges: green = both endpoints in the same module,
+      // red = the edge crosses between two different modules. Opacity kept
+      // in line with EDGE_OPACITY_DEFAULT so circular mode isn't dimmer
+      // than the radial view.
+      coloredEdges = filteredEdges.map((e) => {
+        const same = labels.get(e.from) !== undefined && labels.get(e.from) === labels.get(e.to);
+        return {
+          ...e,
+          color: {
+            color: same ? "#3ddc84" : "#ff5c5c",
+            highlight: "#fdcb6e", hover: "#fdcb6e",
+            opacity: same ? EDGE_OPACITY_DEFAULT * 0.6 : EDGE_OPACITY_DEFAULT,
+          },
+        };
+      });
+    } else if (!isolated) {
       applyRadialLayout(disease, visible, filteredEdges);
     }
 
     // Dim non-matching nodes (search)
-    const finalNodes = [...(disease ? [disease] : []), ...visible].map((n) => {
+    const finalNodes = [...(disease ? [disease] : []), ...visible, ...moduleBubbles].map((n) => {
+      if (n._isModuleBubble) return n;
       const matches = !s || n.fullLabel.toLowerCase().includes(s.toLowerCase()) || n.nodeType === "Disease";
       if (!matches) return {
         ...n,
@@ -291,8 +454,8 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
       return n;
     });
 
-    return { nodes: finalNodes, edges: filteredEdges };
-  }, [applyRadialLayout]);
+    return { nodes: finalNodes, edges: [...coloredEdges, ...moduleConnectors] };
+  }, [applyRadialLayout, applyCircularLayout, layoutMode]);
 
   useEffect(() => {
     if (!allNodes.length) return;
@@ -305,10 +468,10 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
     // every click, since 5000+ edges get re-filtered and the whole layout
     // gets recomputed on every render tied to selection).
     if (isolateMode) return;
-    const g = buildGraph(allNodes, allEdges, nodeLimit, filter, search, activeEdgeTypes, false, undefined);
+    const g = buildGraph(allNodes, allEdges, nodeLimit, filter, search, activeEdgeTypes, false, undefined, layoutMode);
     setGraphData(g);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allNodes, allEdges, nodeLimit, filter, search, activeEdgeTypes]);
+  }, [allNodes, allEdges, nodeLimit, filter, search, activeEdgeTypes, layoutMode]);
 
   /* ── Highlight neighbors on select ─────────────────────────────────── */
   const highlightNeighbors = useCallback((nodeId: any) => {
@@ -347,6 +510,7 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
 
   const events = useMemo(() => ({
     selectNode: ({ nodes: ids }: any) => {
+      if (typeof ids[0] === "string" && ids[0].startsWith("__module_")) return; // module bubble, not a real node
       const n = allNodes.find((x) => x.id === ids[0]);
       setSelectedNode(n ?? null);
       if (n) highlightNeighbors(ids[0]);
@@ -394,6 +558,14 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
             <LegendDot color="#ff4757" glow="rgba(255,71,87,0.6)" label="Disease" shape="circle" />
             <LegendDot color="#00cec9" glow="rgba(0,206,201,0.6)"  label={`Drugs (${visibleDrugs}/${totalDrugs})`} shape="diamond" />
             <LegendDot color="#a29bfe" glow="rgba(162,155,254,0.6)" label={`Genes (${visibleGenes}/${totalGenes})`} shape="ellipse" />
+            {layoutMode === "circular" && (
+              <>
+                <span className="mx-1 opacity-30">|</span>
+                <LegendDot color="#f4c542" glow="rgba(244,197,66,0.6)" label={`Modules (${communityCountRef.current})`} shape="circle" />
+                <LegendDot color="#3ddc84" glow="rgba(61,220,132,0.6)" label="Same module" shape="ellipse" />
+                <LegendDot color="#ff5c5c" glow="rgba(255,92,92,0.6)" label="Crosses modules" shape="ellipse" />
+              </>
+            )}
           </div>
         </div>
       )}
@@ -401,6 +573,18 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
       {/* ── Controls row ── */}
       {allNodes.length > 1 && (
         <div className="flex flex-wrap items-center gap-2 px-1">
+          {/* Layout toggle */}
+          <div className="flex items-center rounded-full border border-gray-300 overflow-hidden">
+            {(["radial","circular"] as const).map((m) => (
+              <button key={m} onClick={() => setLayoutMode(m)}
+                className={`px-3 py-1 text-xs transition-colors ${
+                  layoutMode === m ? "bg-slate-800 text-white" : "bg-white hover:bg-gray-50"
+                }`}>
+                {m === "radial" ? "Radial" : "Circular"}
+              </button>
+            ))}
+          </div>
+
           {/* Node type filter */}
           {(["all","Drug","Gene"] as const).map((f) => (
             <button key={f} onClick={() => setFilter(f)}
