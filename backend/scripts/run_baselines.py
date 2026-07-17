@@ -48,7 +48,13 @@ from app.ml.models.baselines import (
 from app.ml.models.hgt import LinkPredictor, NeuroDrugHGT
 from app.ml.predictor import DrugRepurposingPredictor
 
-from run_training import build_splits, nx_to_heterodata, sample_negatives  # noqa: E402
+from run_training import (  # noqa: E402
+    SPLIT_SEED_TRAIN,
+    SPLIT_SEED_VAL,
+    build_splits,
+    nx_to_heterodata,
+    sample_negatives,
+)
 
 
 GRAPH_EPOCHS_DEFAULT = 60  # fewer than the 100-epoch HGT run since these are baselines, not the main model
@@ -194,9 +200,14 @@ async def main(hgt_checkpoint: str, epochs: int):
     # apparently-inverted AUC. It also meant every baseline below (GCN,
     # R-GCN, HAN) was being *trained* on test_pos mislabeled as negatives.
     train_pos, val_pos, test_pos, all_pos = build_splits(data, n_drug, n_disease)
-    _neg_rng = np.random.default_rng(42)
-    train_neg = sample_negatives(train_pos, all_pos, n_drug, _neg_rng)
-    val_neg = sample_negatives(val_pos, all_pos, n_drug, _neg_rng)
+    # FIX-D2: use the same split-specific, independently-seeded generators as
+    # run_training.py (imported above) instead of a single shared RNG stream,
+    # so val_neg here is bit-for-bit identical to val_neg during training —
+    # previously it wasn't, because this script drew train_neg first and
+    # run_training.py drew val_neg first, which desyncs a stateful Generator
+    # even under the same seed=42.
+    train_neg = sample_negatives(train_pos, all_pos, n_drug, np.random.default_rng(SPLIT_SEED_TRAIN))
+    val_neg = sample_negatives(val_pos, all_pos, n_drug, np.random.default_rng(SPLIT_SEED_VAL))
 
     # FIX-L1 (transductive leakage — see app/ml/edge_filter.py): every model
     # below is evaluated using a graph with val-positive Drug-Disease edges

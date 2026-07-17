@@ -327,6 +327,16 @@ class DynamicNegSamplingDataset(Dataset):
         return b
 
 
+# Independent seeds per split so that sample_negatives(<split>, ...) returns
+# the same negatives regardless of which other splits are sampled before or
+# after it, or in what order — see FIX-D2 below. run_baselines.py imports
+# these directly rather than redefining them, so the two scripts can never
+# drift apart again.
+SPLIT_SEED_TRAIN = 41
+SPLIT_SEED_VAL = 43
+SPLIT_SEED_TEST = 47
+
+
 def build_splits(
     data: HeteroData,
     n_drug: int,
@@ -465,11 +475,19 @@ async def main(batch_size: int = 4096, max_epochs: int = 100, patience: int = 15
     # ── 3. Build train / val / test datasets (70/15/15) ─────────────────────
     train_pos, val_pos, test_pos, all_pos = build_splits(data, n_drug, n_disease)
 
-    # Fixed negatives for val/test (1:1 with positives), sampled once so
-    # evaluation metrics are reproducible run to run.
-    eval_rng = np.random.default_rng(42)
-    val_neg = sample_negatives(val_pos, all_pos, n_drug, eval_rng)
-    test_neg = sample_negatives(test_pos, all_pos, n_drug, eval_rng)
+    # FIX-D2 (val/test negative mismatch across scripts): run_training.py and
+    # run_baselines.py both used a single np.random.default_rng(42) stream for
+    # negatives, but called sample_negatives() in a different order per split
+    # (val-then-test here vs train-then-val there). A Generator's output
+    # depends on how many draws already happened, not just its seed, so "val
+    # negatives" silently differed between the two scripts even though both
+    # said seed=42 — this alone is enough to move val AUC by several points,
+    # because the two scripts were scoring HGT against two different negative
+    # sets while calling it the same "val" metric. Giving each split its own
+    # independently-seeded generator makes a given split's negatives identical
+    # no matter what else is sampled before or after it, in any script.
+    val_neg = sample_negatives(val_pos, all_pos, n_drug, np.random.default_rng(SPLIT_SEED_VAL))
+    test_neg = sample_negatives(test_pos, all_pos, n_drug, np.random.default_rng(SPLIT_SEED_TEST))
 
     # FIX-L1 (transductive leakage): nx_to_heterodata puts every Drug-Disease
     # edge — train, val, AND test — into the graph used for message passing,
