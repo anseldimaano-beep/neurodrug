@@ -20,6 +20,7 @@ class HGTTrainer:
         weight_decay: float = 1e-5,
         max_epochs: int = 200,
         patience: int = 25,
+        min_epochs: int = 0,
         grad_clip: float = 1.0,
         metadata: Optional[Tuple] = None,   # ← FIX: save graph topology with checkpoint
     ):
@@ -29,6 +30,7 @@ class HGTTrainer:
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max_epochs, eta_min=1e-5)
         self.max_epochs = max_epochs
         self.patience = patience
+        self.min_epochs = min_epochs
         self.grad_clip = grad_clip
         self.best_val_auc = 0.0
         self.epochs_no_improve = 0
@@ -184,7 +186,7 @@ class HGTTrainer:
             if epoch % 10 == 0:
                 self.save_checkpoint(f"checkpoint_epoch_{epoch}.pt")
 
-            if self.epochs_no_improve >= self.patience:
+            if epoch >= self.min_epochs and self.epochs_no_improve >= self.patience:
                 logger.info(f"Early stopping triggered at epoch {epoch}")
                 break
 

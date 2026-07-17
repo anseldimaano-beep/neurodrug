@@ -433,7 +433,7 @@ def sample_negatives(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-async def main(batch_size: int = 4096, max_epochs: int = 100, patience: int = 15) -> None:
+async def main(batch_size: int = 4096, max_epochs: int = 100, patience: int = 15, min_epochs: int = 0) -> None:
 
     # ── 1. Load real graph from PostgreSQL ───────────────────────────────────
     logger.info("Connecting to database …")
@@ -541,6 +541,7 @@ async def main(batch_size: int = 4096, max_epochs: int = 100, patience: int = 15
         weight_decay=1e-5,
         max_epochs=max_epochs,
         patience=patience,
+        min_epochs=min_epochs,
         grad_clip=1.0,
         scheduler="cosine_annealing",
         scheduler_eta_min=1e-5,
@@ -564,6 +565,7 @@ async def main(batch_size: int = 4096, max_epochs: int = 100, patience: int = 15
         weight_decay=params["weight_decay"],
         max_epochs=params["max_epochs"],
         patience=params["patience"],
+        min_epochs=params["min_epochs"],
         grad_clip=params["grad_clip"],
         metadata=data.metadata(),
     )
@@ -674,5 +676,17 @@ if __name__ == "__main__":
         "--patience", type=int, default=25,
         help="Early-stopping patience on validation AUC (default: 25 epochs).",
     )
+    parser.add_argument(
+        "--min-epochs", type=int, default=50,
+        help="Floor on epochs before early stopping is allowed to trigger, regardless of "
+             "patience (default: 50). Previously the model could stop as early as epoch "
+             "8 + patience with no way to force a longer run — this guarantees at least "
+             "this many epochs of training every time.",
+    )
     args = parser.parse_args()
-    asyncio.run(main(batch_size=args.batch_size, max_epochs=args.epochs, patience=args.patience))
+    asyncio.run(main(
+        batch_size=args.batch_size,
+        max_epochs=args.epochs,
+        patience=args.patience,
+        min_epochs=args.min_epochs,
+    ))
