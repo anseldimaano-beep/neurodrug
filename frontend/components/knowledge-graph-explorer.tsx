@@ -123,11 +123,9 @@ export default function KnowledgeGraphExplorer({ diseaseId = "MONDO_0018177" }: 
           const baseSize = isDrug ? 20 : 14;
           const size     = Math.min(baseSize + Math.sqrt(deg) * 3, isDrug ? 40 : 30);
           const label    = (n.name || "");
-          // Only show label for higher-degree nodes to reduce clutter
-          const showLabel = deg >= 3;
           return {
-            id:        n.id,
-            label:     showLabel ? (label.length > 16 ? label.slice(0, 16) + "…" : label) : "",
+  	    id:        n.id,
+  	    label:     label.length > 24 ? label.slice(0, 24) + "…" : label,
             fullLabel: label,
             nodeType:  n.node_type,
             degree:    deg,

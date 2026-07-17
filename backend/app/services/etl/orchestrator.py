@@ -570,10 +570,19 @@ class ETLOrchestrator:
             return
         await self._start_job(job)
         try:
+            if not gene_symbols:
+                raise ValueError(
+                    "ingest_cbioportal requires gene_symbols — see FIX C13 "
+                    "in cbioportal.py."
+                )
             async with CBioPortalClient() as client:
-                mutations = await client.get_mutations(study_id)
+                mutations = await client.get_mutations(study_id, gene_symbols)
+                try:
+                    structural_variants = await client.get_structural_variants(study_id, gene_symbols)
+                except ValueError as sv_err:
+                    logger.info(f"[cBioPortal] {study_id}: {sv_err}")
+                    structural_variants = []
 
-            gene_symbols_set = set(gene_symbols) if gene_symbols else None
             genes_seen = set()
             patient_genes: Dict[str, set] = defaultdict(set)
             inserted_genes = 0
@@ -584,8 +593,6 @@ class ETLOrchestrator:
                 gene_symbol = (mut.get("gene") or {}).get("hugoGeneSymbol")
                 patient_id = mut.get("patientId") or mut.get("sampleId")
                 if not gene_symbol or not patient_id:
-                    continue
-                if gene_symbols_set and gene_symbol not in gene_symbols_set:
                     continue
 
                 if gene_symbol not in genes_seen:
@@ -599,6 +606,36 @@ class ETLOrchestrator:
                         inserted_genes += 1
 
                 patient_genes[patient_id].add(gene_symbol)
+
+            # Merge in structural variants (fusions) — same co-occurrence
+            # logic, but each SV record names TWO genes directly (site1Gene,
+            # site2Gene) rather than one gene per record like a mutation.
+            for sv in structural_variants:
+                if not isinstance(sv, dict):
+                    continue
+                patient_id = sv.get("patientId") or sv.get("sampleId")
+                if not patient_id:
+                    continue
+                # FIX C15: the actual API response has flat site1HugoSymbol /
+                # site2HugoSymbol fields, not a nested site1Gene.hugoGeneSymbol
+                # structure — confirmed against a real response (see
+                # es_dfarber_broad_2014 sample dump: 'site1HugoSymbol': 'EWSR1',
+                # 'site2HugoSymbol': 'ERG'). The old field names silently
+                # matched nothing on every real record.
+                for symbol_field in ("site1HugoSymbol", "site2HugoSymbol"):
+                    gene_symbol = sv.get(symbol_field)
+                    if not gene_symbol:
+                        continue
+                    if gene_symbol not in genes_seen:
+                        genes_seen.add(gene_symbol)
+                        res = await self.db.execute(select(Gene).where(Gene.symbol == gene_symbol))
+                        gene = res.scalar_one_or_none()
+                        if not gene:
+                            gene = Gene(symbol=gene_symbol, is_oncogene=True)
+                            self.db.add(gene)
+                            await self.db.flush()
+                            inserted_genes += 1
+                    patient_genes[patient_id].add(gene_symbol)
 
             pair_counts: Counter = Counter()
             for genes_in_patient in patient_genes.values():
@@ -649,13 +686,15 @@ class ETLOrchestrator:
                 inserted_edges += 1
 
             await self.db.commit()
-            await self._finish_job(job, len(mutations), inserted_genes + inserted_edges)
-            await self.update_datasource_status("cbioportal", "success", records=len(mutations))
+            total_records = len(mutations) + len(structural_variants)
+            await self._finish_job(job, total_records, inserted_genes + inserted_edges)
+            await self.update_datasource_status("cbioportal", "success", records=total_records)
             logger.info(
                 f"[cBioPortal] {study_id}: {inserted_genes} new genes, "
                 f"{inserted_edges} new CoMutation edges "
-                f"(from {total_patients} patients, {len(pair_counts)} candidate pairs, "
-                f"min_co_occurrences={min_co_occurrences})"
+                f"({len(mutations)} mutation records, {len(structural_variants)} "
+                f"structural variant records, from {total_patients} patients, "
+                f"{len(pair_counts)} candidate pairs, min_co_occurrences={min_co_occurrences})"
             )
         except Exception as exc:
             await self._fail_job(job, exc)

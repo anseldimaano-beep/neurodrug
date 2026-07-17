@@ -55,6 +55,14 @@ async def main(study_id: str, gene_ids, min_co_occurrences: int):
                   f"co-occurred in {interaction.evidence_score:.0f} patients "
                   f"(freq={interaction.confidence_score:.3f})")
 
+        if not rows:
+            print("\nNo edges found — printing raw structural variant records for debugging:")
+            from app.services.etl.cbioportal import CBioPortalClient
+            async with CBioPortalClient() as dbg_client:
+                svs = await dbg_client.get_structural_variants(study_id, gene_ids or [])
+            for sv in svs[:5]:
+                print(f"  {sv}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
