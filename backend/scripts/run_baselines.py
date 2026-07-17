@@ -245,6 +245,16 @@ async def main(hgt_checkpoint: str, epochs: int):
         hgt_predictor.model(x_dict, masked_edge_index_dict, src_t, dst_t, "Drug", "Disease")
     hgt_predictor.load_checkpoint(hgt_checkpoint)
 
+    # FIX-D3: NeuroDrugHGT has dropout=0.2 in the encoder and the LinkPredictor
+    # head has nn.Dropout(0.3) — both gated on self.training, which PyTorch
+    # modules default to True on construction. Without an explicit .eval()
+    # call, every forward pass below scores with dropout still active,
+    # injecting random noise into the AUC that run_training.py's own
+    # trainer.evaluate() doesn't have (it correctly calls self.model.eval()).
+    # This alone was enough to make the "same" checkpoint look meaningfully
+    # worse here than its own training-time self-reported val AUC.
+    hgt_predictor.model.eval()
+
     with torch.no_grad():
         hgt_logits = hgt_predictor.model(x_dict, masked_edge_index_dict, src_t, dst_t, "Drug", "Disease")
         hgt_scores = torch.sigmoid(hgt_logits).numpy()
