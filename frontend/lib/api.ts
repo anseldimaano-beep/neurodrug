@@ -1,9 +1,16 @@
 import axios from "axios"
 
-// FIX C6 (already applied upstream): use localhost so the browser can reach the API.
-// For containerised deployments override NEXT_PUBLIC_API_URL at build time.
-// Always use relative URLs — Next.js proxy forwards /api/* to the backend container
-const API_BASE = typeof window !== "undefined" ? "http://localhost:8000" : "http://api:8000"
+// On Render (or any host where frontend and backend are separate services),
+// set NEXT_PUBLIC_API_URL to the backend's public URL, e.g.
+// https://neurodrug-api.onrender.com — this must be set at BUILD time since
+// Next.js inlines NEXT_PUBLIC_* vars into the client bundle.
+//
+// Falls back to the local Docker Compose defaults when NEXT_PUBLIC_API_URL
+// is not set: browser -> localhost:8000 (port-mapped), server-side -> the
+// "api" service name on the compose network.
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (typeof window !== "undefined" ? "http://localhost:8000" : "http://api:8000")
 
 export const apiClient = axios.create({
   baseURL: `${API_BASE}/api/v1`,
